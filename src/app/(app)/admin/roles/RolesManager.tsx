@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState, useEffect, useState } from "react";
+import { useFormStatus } from "react-dom";
 import { ACCESS_LEVELS, MODULES, type Permissions } from "@/lib/permissions";
 import { createRole, deleteRole, updateRole, type RoleFormState } from "./actions";
 
@@ -27,7 +27,7 @@ function SubmitButton({ label }: { label: string }) {
 
 function RoleForm({ role, onDone }: { role: RoleRow | null; onDone: () => void }) {
   const action = role ? updateRole.bind(null, role.id) : createRole;
-  const [state, formAction] = useFormState(action, emptyState);
+  const [state, formAction] = useActionState(action, emptyState);
 
   useEffect(() => {
     if (state.success) onDone();

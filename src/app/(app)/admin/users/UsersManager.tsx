@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState, useEffect, useState } from "react";
+import { useFormStatus } from "react-dom";
 import { createUser, resetUserPassword, updateUser, type UserFormState } from "./actions";
 
 type UserRow = {
@@ -27,7 +27,7 @@ function SubmitButton({ label }: { label: string }) {
 }
 
 function CreateUserForm({ roles, onDone }: { roles: RoleOption[]; onDone: () => void }) {
-  const [state, formAction] = useFormState(createUser, emptyState);
+  const [state, formAction] = useActionState(createUser, emptyState);
 
   useEffect(() => {
     if (state.success) onDone();
@@ -79,8 +79,8 @@ function CreateUserForm({ roles, onDone }: { roles: RoleOption[]; onDone: () => 
 function EditUserForm({ user, roles, onDone }: { user: UserRow; roles: RoleOption[]; onDone: () => void }) {
   const boundUpdate = updateUser.bind(null, user.id);
   const boundReset = resetUserPassword.bind(null, user.id);
-  const [state, formAction] = useFormState(boundUpdate, emptyState);
-  const [resetState, resetAction] = useFormState(boundReset, emptyState);
+  const [state, formAction] = useActionState(boundUpdate, emptyState);
+  const [resetState, resetAction] = useActionState(boundReset, emptyState);
 
   useEffect(() => {
     if (state.success) onDone();
