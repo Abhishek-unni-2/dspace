@@ -623,19 +623,41 @@ function renderFileList(key: string) {
     .map((f, i) => `<div class="file-item"><a href="${f.url}" target="_blank">${esc(f.name)}</a><button type="button" onclick="removeProjectFile('${key}', ${i})" title="Remove">✕</button></div>`)
     .join("");
 }
+let directUpload: boolean | null = null;
 async function uploadProjectFiles(key: string, input: HTMLInputElement) {
   const files = Array.from(input.files || []);
   input.value = "";
   if (!files.length) return;
-  const fd = new FormData();
-  files.forEach((f) => fd.append("files", f));
   toast("Uploading…");
   try {
-    const res = await fetch("/api/upload", { method: "POST", body: fd });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Upload failed");
+    if (directUpload === null) {
+      const m = await fetch("/api/upload");
+      directUpload = m.ok ? !!(await m.json()).direct : false;
+    }
+    let uploaded: ProjectFile[] = [];
+    if (directUpload) {
+      // Production: send each file straight to cloud storage (no size cap from the server).
+      const { upload } = await import("@vercel/blob/client");
+      for (const file of files) {
+        const ext = (file.name.split(".").pop() || "").toLowerCase();
+        if (!["pdf", "png", "jpg", "jpeg", "webp", "gif"].includes(ext)) throw new Error(file.name + ": only PDF and image files are allowed");
+        if (file.size > 25 * 1024 * 1024) throw new Error(file.name + ": larger than 25 MB");
+        const stored = crypto.randomUUID() + "." + ext;
+        await upload(stored, file, { access: "public", handleUploadUrl: "/api/upload/blob", multipart: file.size > 8 * 1024 * 1024 });
+        uploaded.push({ name: file.name, url: "/api/files/" + stored });
+      }
+    } else {
+      const fd = new FormData();
+      files.forEach((f) => fd.append("files", f));
+      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      const text = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(text); } catch { /* non-JSON error page */ }
+      if (!res.ok) throw new Error(data.error || "Upload failed (server error)");
+      uploaded = data.files;
+    }
     const multi = key === "images" || key === "floorPlans";
-    formFiles[key] = multi ? [...(formFiles[key] || []), ...data.files] : [data.files[0]];
+    formFiles[key] = multi ? [...(formFiles[key] || []), ...uploaded] : [uploaded[0]];
     renderFileList(key);
     toast("Uploaded");
   } catch (err: any) {
@@ -726,7 +748,7 @@ function openProjectForm(id?: any) {
               <div class="file-list" id="files-${key}"></div>
             </div>`).join("")}
         </div>
-        <div class="helper-text">PDF or images, up to 25 MB each. Files are stored on the server in the <code>uploads/</code> folder.</div>
+        <div class="helper-text">PDF or images, up to 25 MB each. Files are stored securely and shared only through the links you send.</div>
       </div>
 
       <div class="form-section">

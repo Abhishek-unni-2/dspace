@@ -1,7 +1,6 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { getCurrentUser } from "@/lib/auth-guard";
 import { verifyFileSignature } from "@/lib/file-links";
+import { loadFile } from "@/lib/storage";
 
 const TYPES: Record<string, string> = {
   pdf: "application/pdf",
@@ -24,13 +23,10 @@ export async function GET(req: Request, ctx: RouteContext<"/api/files/[name]">) 
   if (!/^[0-9a-f-]{36}\.(pdf|png|jpe?g|webp|gif)$/.test(name)) {
     return new Response("Not found", { status: 404 });
   }
-  try {
-    const data = await readFile(path.join(process.cwd(), "uploads", name));
-    const ext = name.split(".").pop()!;
-    return new Response(data, {
-      headers: { "Content-Type": TYPES[ext], "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff" },
-    });
-  } catch {
-    return new Response("Not found", { status: 404 });
-  }
+  const data = await loadFile(name);
+  if (!data) return new Response("Not found", { status: 404 });
+  const ext = name.split(".").pop()!;
+  return new Response(new Uint8Array(data), {
+    headers: { "Content-Type": TYPES[ext], "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff" },
+  });
 }
