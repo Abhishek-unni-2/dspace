@@ -1,14 +1,12 @@
 // ---------------------------------------------------------------------------
-// Ported from the original dspace-erp_1.html single-file mockup, almost
-// unchanged: same seed data, same render*/submit*/delete* functions, same
-// localStorage persistence. Two differences from the original:
-//   1. Navigation between modules is now real Next.js routes (AppShell),
-//      not a hash router — so NAV/renderNav/CRUMB were dropped here.
-//   2. Every "+ Add", edit and delete control is gated by canEdit(module),
-//      driven by the signed-in user's role permissions (server-verified on
-//      every page load — see requireModule() in src/lib/auth-guard.ts).
-// The underlying data still lives in the browser's localStorage, not
-// Postgres — wiring these modules to the database is a follow-up.
+// Client for the ERP screens. Originally ported from the single-file mockup;
+// the render*/submit*/delete* functions are unchanged, but the data now lives
+// in Postgres and is shared by every user:
+//   - load()/refresh() pull the shared data from /api/erp/data,
+//   - save() sends only the records that changed to /api/erp/sync, where the
+//     server checks the user's permissions, applies the workflow automations
+//     (visit -> lead, booking -> unit/lead/commission) and logs activity,
+//   - new IDs come from blocks reserved on the server (no collisions).
 // ---------------------------------------------------------------------------
 
 import type { ModuleKey, Permissions } from "@/lib/permissions";
@@ -137,176 +135,128 @@ function stBadge(text: string) {
 }
 
 /* ---------------------------- data layer -------------------------------- */
-const LS_KEY = "dspace_erp_data_v1";
+const KEYS = ["projects", "units", "leads", "realtors", "visits", "bookings"] as const;
+let BASE: Record<string, string> = {}; // "collection/id" -> JSON as last known on the server
+let ACTIVITY: any[] = [];
+let ID_POOL: Record<string, { next: number; end: number }> = {};
+let pendingSyncs = 0;
+let syncChain: Promise<void> = Promise.resolve();
+let lastRemote = "";
+let pollTimer: any = null;
 
-function seed() {
-  const projects = [
-    mkProject(1,'Horizon Heights','Express Global Developers','Apartment','Under Construction','Kozhikode','Kinassery','Kozhikode','Kerala',-210,240,300,3,[4,5,6],'2 BHK, 3 BHK','3,650 – 6,900',5800,['Swimming Pool','Gym','Clubhouse','24x7 Security','Covered Parking','Lift','Power Backup']),
-    mkProject(2,'Palm County Villas','DSPACE Developers','Villa','Ready to Move','Kannur','Thottada','Kannur','Kerala',-540,-30,-10,2,[7,8],'3 BHK, 4 BHK Villa','1.15 Cr – 1.85 Cr',null,['Landscaped Garden','Jogging Track','Gated Community','Power Backup','Rainwater Harvesting']),
-    mkProject(3,'The Address Residences','Express Global Developers','Apartment','Under Construction','Kochi','Kakkanad','Ernakulam','Kerala',-95,300,360,4,[9,10,11],'2 BHK, 3 BHK, Penthouse','6,200 – 12,500',6200,['Rooftop Infinity Pool','Clubhouse','Gym','Kids Play Area','Indoor Games','24x7 Security']),
-    mkProject(4,'Greenfield Plots','DSPACE Land Ventures','Plot','Upcoming','Malappuram','Manjeri','Malappuram','Kerala',20,420,null,1,[12],'Residential Plots (3–10 Cents)','12 L – 45 L',null,['Tar Road','Underground Wiring','Boundary Wall','Water Connection']),
-    mkProject(5,'Marina Bay Towers','Express Global Developers','Commercial','Under Construction','Kochi','Marine Drive','Ernakulam','Kerala',-160,180,240,5,[13,14],'Office Space, Retail','8,500 – 15,000',8500,['Central AC','24x7 Security','Power Backup','Ample Parking','High-speed Elevators']),
-    mkProject(6,'Orchid Meadows','DSPACE Developers','Apartment','Ready to Move','Thrissur','Ayyanthole','Thrissur','Kerala',-620,-60,-40,3,[15,16],'2 BHK, 3 BHK','55 L – 92 L',5400,['Swimming Pool','Clubhouse',"Children's Play Area",'Covered Parking']),
-    mkProject(7,'Silver Sands Residency','Express Global Developers','Resort','On Hold','Kozhikode','Kappad','Kozhikode','Kerala',-380,60,120,2,[17],'Studio, 1 BHK (Investment)','38 L – 68 L',7200,['Beach Frontage','Swimming Pool','Restaurant','Concierge']),
-    mkProject(8,'Emerald Court','DSPACE Developers','Mixed-use','Under Construction','Trivandrum','Kazhakkoottam','Trivandrum','Kerala',-45,270,330,5,[18,19],'2 BHK, 3 BHK, Retail','48 L – 1.1 Cr',5900,['Gym','Clubhouse','Retail Plaza','24x7 Security','Lift']),
-  ];
+function snapshot(db: any) {
+  const m: Record<string, string> = {};
+  for (const k of KEYS) for (const r of db[k]) m[k + "/" + r.id] = JSON.stringify(r);
+  return m;
+}
+function applyRemote(data: any, raw: string) {
+  DB = { ...data.collections };
+  ACTIVITY = data.activity || [];
+  BASE = snapshot(DB);
+  lastRemote = raw;
+}
+async function fetchRemote() {
+  const res = await fetch("/api/erp/data", { cache: "no-store" });
+  if (!res.ok) throw new Error("Could not load data");
+  const raw = await res.text();
+  return { raw, data: JSON.parse(raw) };
+}
+async function load() {
+  const { raw, data } = await fetchRemote();
+  applyRemote(data, raw);
+  await refillIds();
+}
+// Re-pull shared data so changes made by other users appear. Skipped while a
+// save is in flight, or (unless forced) while the user is typing in the page.
+async function refresh(force?: boolean) {
+  if (!DB || pendingSyncs > 0) return;
+  try {
+    const { raw, data } = await fetchRemote();
+    if (raw === lastRemote && !force) return;
+    const el = document.activeElement as HTMLElement | null;
+    const typing = el && document.getElementById("view-root")?.contains(el) && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+    if (typing && !force) return;
+    applyRemote(data, raw);
+    render();
+  } catch {
+    /* offline or transient — try again next tick */
+  }
+}
 
-  const units: any[] = [];
-  let u = 1;
-  const unitPlan: any[] = [
-    [1,'A',6,'2 BHK',1050,'East',5800*1050,['Available','Available','Reserved','Sold','Available','On Hold']],
-    [1,'B',4,'3 BHK',1450,'West',5800*1450,['Available','Sold','Reserved','Available']],
-    [2,'—',10,'4 BHK Villa',2400,'North',16500000,['Available','Sold','Sold','Available','Reserved','Sold','Available','Available','Sold','Available']],
-    [3,'C',8,'3 BHK',1620,'South-East',6200*1620,['Available','Available','Reserved','Sold','Sold','Available','On Hold','Available']],
-    [3,'D',4,'Penthouse',2800,'Corner',6200*2800*1.15,['Available','Reserved','Sold','Available']],
-    [5,'—',6,'Office Space',900,'East',8500*900,['Available','Reserved','Sold','Available','Available','Sold']],
-    [6,'E',6,'2 BHK',980,'West',5400*980,['Sold','Sold','Available','Reserved','Sold','Available']],
-    [8,'F',7,'3 BHK',1380,'North',5900*1380,['Available','Available','Reserved','Sold','Available','On Hold','Available']],
-  ];
-  unitPlan.forEach(([pid, block, count, type, area, facing, priceBase]) => {
-    const statuses = unitPlan.find((x) => x[0] === pid && x[3] === type)[7];
-    for (let i = 0; i < count; i++) {
-      units.push({
-        id: uid("UNT", u),
-        projectId: uid("DSP", pid),
-        unitNo: (block !== "—" ? block : "") + (101 + i + Math.floor(i / 4) * 100),
-        floor: Math.floor(i / 4) + 1,
-        type,
-        area,
-        facing,
-        price: Math.round(priceBase * (1 + (i % 3) * 0.015)),
-        status: statuses[i] || "Available",
-        realtorId: i % 5 === 0 ? null : "RLT-" + String((i % 6) + 1).padStart(3, "0"),
-      });
-      u++;
+async function refillIds() {
+  try {
+    const res = await fetch("/api/erp/reserve", { method: "POST" });
+    if (!res.ok) return;
+    const r = await res.json();
+    for (const k of Object.keys(r)) ID_POOL[k] = { next: r[k].start, end: r[k].end };
+  } catch {
+    /* ignore — nextId falls back */
+  }
+}
+function nextId(counter: string, prefix: string) {
+  const p = ID_POOL[counter];
+  if (p && p.next <= p.end) {
+    const n = p.next++;
+    if (p.end - p.next < 5) void refillIds();
+    return uid(prefix, n);
+  }
+  void refillIds();
+  return prefix + "-" + (900000 + Math.floor(Math.random() * 99999));
+}
+
+// Called after every local edit: works out which records changed and sends
+// just those. The server replies with the full, automation-updated data.
+function save() {
+  const now = snapshot(DB);
+  const changes: any[] = [];
+  const deletedProjects = new Set<string>();
+  for (const key of Object.keys(BASE)) {
+    if (!(key in now) && key.startsWith("projects/")) deletedProjects.add(key.split("/")[1]);
+  }
+  for (const key of Object.keys(now)) {
+    if (BASE[key] !== now[key]) {
+      const i = key.indexOf("/");
+      changes.push({ collection: key.slice(0, i), id: key.slice(i + 1), op: "put", data: JSON.parse(now[key]) });
+    }
+  }
+  for (const key of Object.keys(BASE)) {
+    if (key in now) continue;
+    const i = key.indexOf("/");
+    const collection = key.slice(0, i);
+    // Units of a deleted project are removed by the server along with it.
+    if (collection === "units" && deletedProjects.has(JSON.parse(BASE[key]).projectId)) continue;
+    changes.push({ collection, id: key.slice(i + 1), op: "delete" });
+  }
+  BASE = now;
+  if (!changes.length) return;
+
+  pendingSyncs++;
+  syncChain = syncChain.then(async () => {
+    try {
+      const res = await fetch("/api/erp/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ changes }) });
+      const raw = await res.text();
+      if (!res.ok) {
+        let msg = "Could not save";
+        try { msg = JSON.parse(raw).error || msg; } catch { /* keep default */ }
+        throw new Error(msg);
+      }
+      if (pendingSyncs === 1) {
+        applyRemote(JSON.parse(raw), raw);
+        render();
+      }
+    } catch (err: any) {
+      toast(err?.message || "Could not save — reloading");
+      pendingSyncs--;
+      await refresh(true);
+      pendingSyncs++;
+    } finally {
+      pendingSyncs--;
     }
   });
-
-  const realtors = [
-    mkRealtor(1,'Arjun Menon','9847012345','arjun.menon@dspacerealty.com','Independent','Kozhikode',2.0,'Active'),
-    mkRealtor(2,'Fathima Rasheed','9847098765','fathima.r@primeproperties.in','Prime Properties','Kochi',1.5,'Active'),
-    mkRealtor(3,'Vishnu Prasad','9895112233','vishnu.prasad@gmail.com','Independent','Thrissur',2.0,'Active'),
-    mkRealtor(4,'Nandita Suresh','9744556677','nandita.s@urbannest.in','Urban Nest Realty','Trivandrum',1.75,'Active'),
-    mkRealtor(5,'Rahul Krishnan','9633441122','rahul.k@gmail.com','Independent','Kannur',2.0,'Inactive'),
-    mkRealtor(6,'Sneha Thomas','9847665544','sneha.thomas@espaceadvisors.com','eSpace Advisors','Kochi',1.5,'Active'),
-  ];
-
-  const leads = [
-    mkLead(1,'Manoj Pillai','9840011122','manoj.pillai@gmail.com','Website',1,'70 L – 90 L','Negotiation',1,-3,2),
-    mkLead(2,'Divya Nair','9895223344','divya.nair@yahoo.com','Referral',3,'80 L – 1.1 Cr','Site Visit Scheduled',2,-1,1),
-    mkLead(3,'Sajith Kumar','9744332211','sajith.kumar@outlook.com','Walk-in',2,'1.2 Cr – 1.6 Cr','Contacted',1,0,3),
-    mkLead(4,'Anjali Varma','9633887766','anjali.varma@gmail.com','Social Media',6,'55 L – 65 L','New',3,0,0),
-    mkLead(5,'Rohit Balan','9847556699','rohit.balan@gmail.com','Campaign',5,'40 L – 50 L','Converted',6,-15,25),
-    mkLead(6,'Priya Warrier','9895667788','priya.warrier@gmail.com','Website',3,'90 L – 1.3 Cr','Contacted',4,1,5),
-    mkLead(7,'Kiran Das','9744998877','kiran.das@gmail.com','Referral',8,'50 L – 75 L','New',2,0,0),
-    mkLead(8,'Meera Joseph','9633114455','meera.joseph@gmail.com','Call',4,'12 L – 20 L','Negotiation',3,-2,4),
-    mkLead(9,'Suhail Rahman','9847334422','suhail.rahman@gmail.com','Website','','₹8,500/sqft budget','Lost',5,-20,10),
-    mkLead(10,'Athira Menon','9895445566','athira.menon@gmail.com','Site Visit Walk-in',1,'85 L – 95 L','Site Visit Scheduled',1,0,1),
-    mkLead(11,'Deepak Chandran','9744221133','deepak.c@gmail.com','Campaign',7,'45 L – 60 L','New',6,0,0),
-    mkLead(12,'Lakshmi Iyer','9633556688','lakshmi.iyer@gmail.com','Referral',8,'35 L – 42 L','Contacted',2,2,6),
-  ];
-
-  const visits = [
-    mkVisit(1,2,1,'UNT-001',1,0,'Scheduled'),
-    mkVisit(2,10,1,'UNT-002',1,1,'Scheduled'),
-    mkVisit(3,3,3,'UNT-022',1,-2,'Completed Visit'),
-    mkVisit(4,6,3,'UNT-021',4,-4,'Completed Visit'),
-    mkVisit(5,1,1,'UNT-003',1,-6,'Completed Visit'),
-    mkVisit(6,8,6,'UNT-041',4,-1,'Scheduled'),
-    mkVisit(7,5,5,'UNT-035',6,-20,'Completed Visit'),
-    mkVisit(8,9,7,null,5,-25,'No-show'),
-    mkVisit(9,4,8,'UNT-047',3,2,'Scheduled'),
-    mkVisit(10,12,7,null,2,-3,'Cancelled'),
-  ];
-
-  const bookings = [
-    mkBooking(1,5,5,'UNT-013',6,-15,4200000,420000,2.0,'Received','Confirmed'),
-    mkBooking(2,'','','UNT-006',2,-20,16500000,1500000,2.0,'Received','Confirmed'),
-    mkBooking(3,'','','UNT-009',1,-9,6090000,600000,2.0,'Pending','Booked'),
-    mkBooking(4,'','','UNT-016',3,-5,10160000,900000,1.5,'Pending','Booked'),
-    mkBooking(5,'','','UNT-024',6,-7,7650000,650000,1.5,'Received','Confirmed'),
-    mkBooking(6,'','','UNT-004',2,-45,16500000,1500000,2.0,'Received','Confirmed'),
-    mkBooking(7,'','','UNT-028',4,-2,9126000,800000,1.75,'Pending','Booked'),
-  ];
-
-  return { projects, units, leads, realtors, visits, bookings, counters: { project: 8, unit: units.length, lead: 12, realtor: 6, visit: 10, booking: 7 } };
-}
-
-function mkProject(n: any, name: any, dev: any, type: any, status: any, city: any, locality: any, district: any, state: any, launchOffset: any, expOffset: any, possOffset: any, teamCount: any, realtorIdxs: any, unitTypes: any, priceRange: any, psf: any, amenities: any) {
-  const rid = uid("DSP", n);
-  return {
-    id: rid, name, developer: dev, type, status,
-    location: city, locality, district, state,
-    mapsUrl: "https://maps.google.com/?q=" + encodeURIComponent(name + " " + city),
-    website: "https://" + name.toLowerCase().replace(/[^a-z0-9]+/g, "") + ".com",
-    dspaceUrl: "https://dspace.co.in/projects/" + rid.toLowerCase(),
-    rera: "K-RERA/PRJ/" + (2024 + (n % 3)) + "/" + (1000 + n * 37),
-    reraStatus: status === "Upcoming" ? "Applied / Pending" : "Registered",
-    launchDate: addDays(launchOffset), expectedCompletion: addDays(expOffset), possessionDate: addDays(possOffset),
-    unitTypes, priceRange, pricePerSqft: psf,
-    amenities,
-    assignedRealtors: realtorIdxs.map((i: any) => uid("RLT", Math.min(i, 6))),
-    notes: "",
-  };
-}
-function mkRealtor(n: any, name: any, phone: any, email: any, agency: any, region: any, rate: any, status: any) {
-  return { id: uid("RLT", n), name, phone, email, agency, region, commissionRate: rate, status };
-}
-function mkLead(n: any, name: any, phone: any, email: any, source: any, projectN: any, budget: any, status: any, realtorN: any, followOffset: any, createdOffsetPast: any) {
-  return {
-    id: uid("LD", n), name, phone, email, source,
-    projectId: projectN ? uid("DSP", projectN) : "",
-    budget, status,
-    realtorId: realtorN ? uid("RLT", realtorN) : "",
-    followUpDate: followOffset !== undefined && followOffset !== null ? addDays(followOffset) : "",
-    createdDate: addDays(-createdOffsetPast),
-    notes: "",
-  };
-}
-function mkVisit(n: any, leadN: any, projectN: any, unitId: any, realtorN: any, dateOffset: any, status: any) {
-  return {
-    id: uid("SV", n), leadId: uid("LD", leadN), projectId: uid("DSP", projectN), unitId: unitId || "",
-    realtorId: uid("RLT", realtorN), date: addDays(dateOffset), time: ["10:00 AM", "11:30 AM", "2:00 PM", "4:00 PM", "5:30 PM"][n % 5],
-    status, feedback: status === "Completed Visit" ? "Interested, comparing with another project." : "",
-  };
-}
-function mkBooking(n: any, leadN: any, realtorNUnused: any, unitId: any, realtorN: any, dateOffset: any, saleValue: any, commission: any, rate: any, commStatus: any, status: any) {
-  return {
-    id: uid("BK", n), leadId: leadN ? uid("LD", leadN) : "", unitId,
-    realtorId: uid("RLT", realtorN), bookingDate: addDays(dateOffset),
-    saleValue, tokenAmount: Math.round(saleValue * 0.1), commissionRate: rate, commissionAmount: commission,
-    commissionStatus: commStatus, status,
-  };
-}
-
-function load() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (raw) {
-      DB = JSON.parse(raw);
-      return;
-    }
-  } catch {
-    // ignore corrupt localStorage, fall through to reseed
-  }
-  DB = seed();
-  save();
-}
-function save() {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(DB));
-  } catch {
-    // storage unavailable (private mode, quota) — non-fatal for this mockup
-  }
-}
-function resetDemoData() {
-  DB = seed();
-  save();
-  toast("Sample data reset");
-  render();
 }
 
 /* -------- lookups -------- */
+const liveBookings = () => DB.bookings.filter((b: any) => b.status !== "Cancelled");
 const projectById = (id: any) => DB.projects.find((p: any) => p.id === id);
 const realtorById = (id: any) => DB.realtors.find((r: any) => r.id === id);
 const leadById = (id: any) => DB.leads.find((l: any) => l.id === id);
@@ -336,7 +286,7 @@ function render() {
 
 /* ---------------------------- DASHBOARD ---------------------------------- */
 function dashboardMetrics() {
-  const p = DB.projects, u = DB.units, l = DB.leads, r = DB.realtors, v = DB.visits, b = DB.bookings;
+  const p = DB.projects, u = DB.units, l = DB.leads, r = DB.realtors, v = DB.visits, b = liveBookings();
   const bookingsThisMonth = b.filter((x: any) => isThisMonth(x.bookingDate));
   const salesValueThisMonth = bookingsThisMonth.reduce((s: number, x: any) => s + Number(x.saleValue || 0), 0);
   const expectedCommission = b.reduce((s: number, x: any) => s + Number(x.commissionAmount || 0), 0);
@@ -380,9 +330,14 @@ function renderDashboard() {
     .sort((a: any, b: any) => +new Date(a.date) - +new Date(b.date))
     .slice(0, 5);
 
+  const overdueLeads = DB.leads
+    .filter((l: any) => l.followUpDate && l.followUpDate < todayISO() && !["Converted", "Lost"].includes(l.status))
+    .sort((a: any, b: any) => (a.followUpDate < b.followUpDate ? -1 : 1))
+    .slice(0, 6);
+
   const realtorRank = [...DB.realtors]
     .map((r: any) => {
-      const sales = DB.bookings.filter((b: any) => b.realtorId === r.id).reduce((s: number, x: any) => s + Number(x.saleValue || 0), 0);
+      const sales = liveBookings().filter((b: any) => b.realtorId === r.id).reduce((s: number, x: any) => s + Number(x.saleValue || 0), 0);
       return { ...r, sales };
     })
     .sort((a: any, b: any) => b.sales - a.sales)
@@ -398,16 +353,14 @@ function renderDashboard() {
   ].join("");
 
   return `
-    <div class="dev-note">UI reference build — dashboard figures below are computed live from the sample dataset (stored in this browser's local storage) so the data relationships are visible. Wiring these modules to the Postgres database is a planned follow-up.</div>
-
     <div class="command-bar">
       <div class="cb-title">DSPACE COMMAND CENTER</div>
       <div class="cb-item"><div class="cb-label">PROJECTS</div><div class="cb-value">${m.totalProjects}</div></div>
       <div class="cb-item"><div class="cb-label">AVAILABLE</div><div class="cb-value">${m.availableUnits} <span style="font-size:12px;font-weight:600;">UNITS</span></div></div>
       <div class="cb-item"><div class="cb-label">LEADS</div><div class="cb-value">${formatNum(m.totalLeads)}</div></div>
       <div class="cb-item"><div class="cb-label">SITE VISITS</div><div class="cb-value">${DB.visits.length}</div></div>
-      <div class="cb-item"><div class="cb-label">BOOKINGS</div><div class="cb-value">${DB.bookings.length}</div></div>
-      <div class="cb-item"><div class="cb-label">SALES VALUE</div><div class="cb-value">${formatCr(DB.bookings.reduce((s: number, x: any) => s + Number(x.saleValue || 0), 0))}</div></div>
+      <div class="cb-item"><div class="cb-label">BOOKINGS</div><div class="cb-value">${liveBookings().length}</div></div>
+      <div class="cb-item"><div class="cb-label">SALES VALUE</div><div class="cb-value">${formatCr(liveBookings().reduce((s: number, x: any) => s + Number(x.saleValue || 0), 0))}</div></div>
       <div class="cb-item"><div class="cb-label">COMMISSION</div><div class="cb-value">${formatCr(m.expectedCommission)}</div></div>
     </div>
 
@@ -452,7 +405,7 @@ function renderDashboard() {
         <h3>Recently Added Leads</h3>
         ${recentLeads.map((l: any) => `
           <div class="rank-row">
-            <div class="rank-badge">${l.source.slice(0, 2).toUpperCase()}</div>
+            <div class="rank-badge">${String(l.source || "—").slice(0, 2).toUpperCase()}</div>
             <div class="rank-name">${esc(l.name)}<div class="cell-muted" style="font-size:11px;">${projectById(l.projectId)?.name || "General inquiry"}</div></div>
             ${stBadge(l.status)}
           </div>`).join("") || emptyRow()}
@@ -464,6 +417,25 @@ function renderDashboard() {
             <div class="rank-badge ${i === 0 ? "gold" : ""}">${i + 1}</div>
             <div class="rank-name">${esc(r.name)}<div class="cell-muted" style="font-size:11px;">${esc(r.agency)}</div></div>
             <div class="rank-val">${formatCr(r.sales)}</div>
+          </div>`).join("") || emptyRow()}
+      </div>
+    </div>
+
+    <div class="two-col" style="margin-top:22px;">
+      <div class="mini-panel">
+        <h3>Needs Attention — Overdue Follow-ups</h3>
+        ${overdueLeads.map((l: any) => `
+          <div class="rank-row">
+            <div class="rank-badge" style="background:var(--red-bg); color:var(--red);">!</div>
+            <div class="rank-name">${esc(l.name)}<div class="cell-muted" style="font-size:11px;">Due ${formatDate(l.followUpDate)} · ${esc(realtorById(l.realtorId)?.name || "Unassigned")}</div></div>
+            ${stBadge(l.status)}
+          </div>`).join("") || `<div class="cell-muted" style="padding:10px 0;">No overdue follow-ups. 🎉</div>`}
+      </div>
+      <div class="mini-panel">
+        <h3>Recent Activity</h3>
+        ${ACTIVITY.slice(0, 8).map((a: any) => `
+          <div class="rank-row">
+            <div class="rank-name" style="flex:1;">${esc(a.summary)}<div class="cell-muted" style="font-size:11px;">${esc(a.userName)} · ${new Date(a.createdAt).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</div></div>
           </div>`).join("") || emptyRow()}
       </div>
     </div>
@@ -614,17 +586,69 @@ function viewProject(id: any) {
         ${canEdit("units") ? `<div style="margin-top:12px;"><button class="btn btn-outline btn-sm" onclick="closeModal(); openUnitForm(null, '${p.id}')">+ Add Unit to this Project</button></div>` : ""}
       </div>
       <div class="form-section">
+        <div class="form-section-title">Media &amp; Documents</div>
+        <div class="form-grid">
+          ${FILE_SLOTS.map(([key, label]) => `<div class="field"><label>${label.replace(/^\S+\s+Upload\s+/, "")}</label><div>${fileLinks(p.files?.[key])}</div></div>`).join("")}
+        </div>
+        ${(p.files?.images || []).some(isImageFile) ? `<div class="gallery">${(p.files.images as ProjectFile[]).filter(isImageFile).map((f: ProjectFile) => `<a href="${f.url}" target="_blank"><img src="${f.url}" alt="${esc(f.name)}"></a>`).join("")}</div>` : ""}
+      </div>
+      <div class="form-section">
         <div class="form-section-title">Amenities</div>
         <div style="display:flex; flex-wrap:wrap; gap:6px;">${p.amenities.map((a: string) => badge(a, "slate")).join("")}</div>
       </div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
+      <button class="btn btn-outline" onclick="closeModal(); openShareProject('${p.id}')">Share via WhatsApp</button>
       ${canEdit("projects") ? `<button class="btn btn-navy" onclick="closeModal(); openProjectForm('${p.id}')">Edit Project</button>` : ""}
     </div>
   `,
     true
   );
+}
+
+type ProjectFile = { name: string; url: string };
+const FILE_SLOTS: [string, string][] = [
+  ["brochure", "📄 Upload Brochure (PDF)"],
+  ["masterPlan", "🗺️ Upload Master Plan"],
+  ["floorPlans", "📐 Upload Floor Plans"],
+  ["images", "🖼️ Upload Project Images (gallery)"],
+];
+let formFiles: Record<string, ProjectFile[]> = {};
+
+function renderFileList(key: string) {
+  const el = document.getElementById("files-" + key);
+  if (!el) return;
+  el.innerHTML = (formFiles[key] || [])
+    .map((f, i) => `<div class="file-item"><a href="${f.url}" target="_blank">${esc(f.name)}</a><button type="button" onclick="removeProjectFile('${key}', ${i})" title="Remove">✕</button></div>`)
+    .join("");
+}
+async function uploadProjectFiles(key: string, input: HTMLInputElement) {
+  const files = Array.from(input.files || []);
+  input.value = "";
+  if (!files.length) return;
+  const fd = new FormData();
+  files.forEach((f) => fd.append("files", f));
+  toast("Uploading…");
+  try {
+    const res = await fetch("/api/upload", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Upload failed");
+    const multi = key === "images" || key === "floorPlans";
+    formFiles[key] = multi ? [...(formFiles[key] || []), ...data.files] : [data.files[0]];
+    renderFileList(key);
+    toast("Uploaded");
+  } catch (err: any) {
+    toast(err.message || "Upload failed");
+  }
+}
+function removeProjectFile(key: string, i: number) {
+  formFiles[key].splice(i, 1);
+  renderFileList(key);
+}
+const isImageFile = (f: ProjectFile) => /\.(png|jpe?g|webp|gif)$/i.test(f.url);
+function fileLinks(files: ProjectFile[] | undefined) {
+  return (files || []).map((f) => `<a href="${f.url}" target="_blank" style="color:var(--blue);">${esc(f.name)}</a>`).join(" · ") || "—";
 }
 
 function openProjectForm(id?: any) {
@@ -696,12 +720,13 @@ function openProjectForm(id?: any) {
       <div class="form-section">
         <div class="form-section-title">Media &amp; Documents</div>
         <div class="form-grid">
-          <div class="file-btn">📄 Upload Brochure (PDF)</div>
-          <div class="file-btn">🗺️ Upload Master Plan</div>
-          <div class="file-btn">📐 Upload Floor Plans</div>
-          <div class="file-btn">🖼️ Upload Project Images (gallery)</div>
+          ${FILE_SLOTS.map(([key, label]) => `
+            <div class="file-slot">
+              <label class="file-btn"><input type="file" hidden ${key === "images" || key === "floorPlans" ? "multiple" : ""} accept=".pdf,image/*" onchange="uploadProjectFiles('${key}', this)">${label}</label>
+              <div class="file-list" id="files-${key}"></div>
+            </div>`).join("")}
         </div>
-        <div class="helper-text">File upload is illustrative in this mockup — wire to real storage (S3 / Cloudinary etc.) on integration.</div>
+        <div class="helper-text">PDF or images, up to 25 MB each. Files are stored on the server in the <code>uploads/</code> folder.</div>
       </div>
 
       <div class="form-section">
@@ -718,6 +743,8 @@ function openProjectForm(id?: any) {
   `,
     true
   );
+  formFiles = JSON.parse(JSON.stringify((p && p.files) || {}));
+  FILE_SLOTS.forEach(([key]) => renderFileList(key));
 }
 
 function submitProject(e: Event, existingId: any) {
@@ -732,19 +759,146 @@ function submitProject(e: Event, existingId: any) {
     rera: f.get("rera"), reraStatus: f.get("reraStatus"),
     launchDate: f.get("launchDate"), expectedCompletion: f.get("expectedCompletion"), possessionDate: f.get("possessionDate"),
     unitTypes: f.get("unitTypes"), priceRange: f.get("priceRange"), pricePerSqft: f.get("pricePerSqft") || null,
-    amenities, notes: f.get("notes"),
+    amenities, notes: f.get("notes"), files: formFiles,
   };
   if (existingId) {
     Object.assign(projectById(existingId), data);
     toast("Project updated");
   } else {
-    const id = uid("DSP", ++DB.counters.project);
+    const id = nextId("project", "DSP");
     DB.projects.push({ id, ...data, assignedRealtors: [] });
     toast("Project created");
   }
   save();
   closeModal();
   render();
+  return false;
+}
+
+/* ---------------------- share project via WhatsApp ---------------------- */
+function openShareProject(id: any) {
+  const p = projectById(id);
+  if (!p) return;
+  const fileRows = FILE_SLOTS.flatMap(([key, label]) =>
+    ((p.files?.[key] || []) as ProjectFile[]).map((f, i) => ({ key, i, label: label.replace(/^\S+\s+Upload\s+/, ""), f }))
+  );
+  openModal(
+    `
+    <div class="modal-head">
+      <div><h3>Share ${esc(p.name)}</h3><div class="sub">Choose what to send, then WhatsApp opens with the message ready.</div></div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form id="share-form" onsubmit="return sendProjectWhatsApp(event, '${p.id}')">
+    <div class="modal-body">
+      <div class="form-section">
+        <div class="form-section-title">Client</div>
+        <div class="form-grid">
+          <div class="field"><label>Client name <span class="opt">(optional)</span></label><input name="clientName"></div>
+          <div class="field"><label>WhatsApp number <span class="opt">(optional — leave blank to pick a chat in WhatsApp)</span></label><input name="phone" placeholder="e.g. 9847012345"></div>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Details to include</div>
+        <div class="checkbox-grid">
+          <label class="chk"><input type="checkbox" name="inc" value="basic" checked> Type, status, developer</label>
+          <label class="chk"><input type="checkbox" name="inc" value="location" checked> Location &amp; map link</label>
+          <label class="chk"><input type="checkbox" name="inc" value="pricing" checked> Price &amp; unit types</label>
+          <label class="chk"><input type="checkbox" name="inc" value="timeline" checked> RERA &amp; timeline</label>
+          <label class="chk"><input type="checkbox" name="inc" value="amenities" checked> Amenities</label>
+          <label class="chk"><input type="checkbox" name="inc" value="units" checked> Available units</label>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Files to include (shown on the shared page)</div>
+        ${fileRows.length ? `<div class="checkbox-grid" style="grid-template-columns:repeat(2,1fr);">${fileRows.map((r) => `<label class="chk"><input type="checkbox" name="file" value="${r.f.url}" data-label="${esc(r.f.name)}" checked> ${esc(r.label)}: ${esc(r.f.name)}</label>`).join("")}</div>` : `<div class="helper-text">No files uploaded for this project yet.</div>`}
+        <div class="helper-text">The client gets one link. WhatsApp shows it as a preview card with the first image, and the page shows all images, details and documents. The card only appears when the app is on a public address — on localhost the link opens only on this computer.</div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Extra note</div>
+        <div class="field"><textarea name="note" placeholder="Optional personal message…"></textarea></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button type="submit" class="btn btn-navy">Open WhatsApp</button>
+    </div>
+    </form>
+  `,
+    true
+  );
+}
+
+async function sendProjectWhatsApp(e: Event, id: any) {
+  e.preventDefault();
+  const p = projectById(id);
+  if (!p) return false;
+  // Open the tab synchronously (before any await) so the popup blocker allows it.
+  const win = window.open("about:blank", "_blank");
+  const f = new FormData(e.target as HTMLFormElement);
+  const inc = new Set(f.getAll("inc") as string[]);
+  const fileUrls = f.getAll("file") as string[];
+  const fileNames: Record<string, string> = {};
+  (e.target as HTMLFormElement).querySelectorAll<HTMLInputElement>('input[name="file"]').forEach((inp) => (fileNames[inp.value] = inp.dataset.label || ""));
+
+  const sections: { heading: string; lines: string[] }[] = [];
+  if (inc.has("location")) {
+    const lines = [[p.locality, p.location, p.district, p.state].filter(Boolean).join(", ")];
+    if (p.mapsUrl) lines.push(p.mapsUrl);
+    sections.push({ heading: "Location", lines });
+  }
+  if (inc.has("pricing")) {
+    const lines: string[] = [];
+    if (p.priceRange) lines.push(`Price: ${p.priceRange}`);
+    if (p.pricePerSqft) lines.push(`₹${formatNum(p.pricePerSqft)}/sqft`);
+    if (p.unitTypes) lines.push(`Units: ${p.unitTypes}`);
+    if (lines.length) sections.push({ heading: "Price & Units", lines });
+  }
+  if (inc.has("timeline")) {
+    const lines: string[] = [];
+    if (p.rera) lines.push(`RERA: ${p.rera} (${p.reraStatus})`);
+    if (p.launchDate) lines.push(`Launch: ${formatDate(p.launchDate)}`);
+    if (p.expectedCompletion) lines.push(`Completion: ${formatDate(p.expectedCompletion)}`);
+    if (p.possessionDate) lines.push(`Possession: ${formatDate(p.possessionDate)}`);
+    if (lines.length) sections.push({ heading: "RERA & Timeline", lines });
+  }
+  if (inc.has("amenities") && p.amenities?.length) sections.push({ heading: "Amenities", lines: [p.amenities.join(", ")] });
+  if (inc.has("units")) {
+    const avail = unitsOf(p.id).filter((u: any) => u.status === "Available");
+    if (avail.length) sections.push({ heading: "Availability", lines: [`Available units: ${avail.length}`] });
+  }
+
+  const clientName = String(f.get("clientName") || "").trim();
+  const note = String(f.get("note") || "").trim();
+  let shareUrl = "";
+  try {
+    const res = await fetch("/api/shares", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: p.name,
+        subtitle: inc.has("basic") ? `${p.type} · ${p.status} · By ${p.developer}` : "",
+        sections,
+        files: fileUrls.map((u) => ({ name: fileNames[u], file: u.replace("/api/files/", "") })),
+        note,
+        clientName,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed");
+    shareUrl = data.url;
+  } catch {
+    toast("Could not create share link");
+    win?.close();
+    return false;
+  }
+
+  const text = [clientName ? `Hello ${clientName},` : "Hello,", "", `Here are the details of *${p.name}*:`, shareUrl, note ? "\n" + note : "", "— DSPACE"].filter((x) => x !== "").join("\n");
+  let phone = String(f.get("phone") || "").replace(/\D/g, "");
+  if (phone.length === 10) phone = "91" + phone;
+  const url = `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
+  if (win) win.location.href = url;
+  else window.location.href = url;
+  closeModal();
   return false;
 }
 
@@ -848,7 +1002,7 @@ function submitUnit(e: Event, existingId: any) {
     Object.assign(unitById(existingId), data);
     toast("Unit updated");
   } else {
-    DB.units.push({ id: uid("UNT", ++DB.counters.unit), ...data });
+    DB.units.push({ id: nextId("unit", "UNT"), ...data });
     toast("Unit added");
   }
   save();
@@ -959,7 +1113,7 @@ function submitLead(e: Event, existingId: any) {
     Object.assign(leadById(existingId), data);
     toast("Lead updated");
   } else {
-    DB.leads.push({ id: uid("LD", ++DB.counters.lead), ...data, createdDate: todayISO() });
+    DB.leads.push({ id: nextId("lead", "LD"), ...data, createdDate: todayISO() });
     toast("Lead added");
   }
   save();
@@ -1068,7 +1222,7 @@ function submitRealtor(e: Event, existingId: any) {
     Object.assign(realtorById(existingId), data);
     toast("Realtor updated");
   } else {
-    DB.realtors.push({ id: uid("RLT", ++DB.counters.realtor), ...data });
+    DB.realtors.push({ id: nextId("realtor", "RLT"), ...data });
     toast("Realtor added");
   }
   save();
@@ -1164,7 +1318,7 @@ function submitVisit(e: Event, existingId: any) {
     Object.assign(DB.visits.find((x: any) => x.id === existingId), data);
     toast("Site visit updated");
   } else {
-    DB.visits.push({ id: uid("SV", ++DB.counters.visit), ...data });
+    DB.visits.push({ id: nextId("visit", "SV"), ...data });
     toast("Site visit scheduled");
   }
   save();
@@ -1237,12 +1391,12 @@ function openBookingForm(id?: any) {
       <div><h3>${bk ? "Edit Booking" : "Add Booking"}</h3><div class="sub">${bk ? bk.id : "New Booking"}</div></div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <form onsubmit="return submitBooking(event, ${bk ? `'${bk.id}'` : "null"})">
+    <form ${bk ? "data-editing-booking" : ""} onsubmit="return submitBooking(event, ${bk ? `'${bk.id}'` : "null"})">
     <div class="modal-body">
       <div class="form-grid">
         <div class="field"><label>Lead / Buyer <span class="opt">(optional)</span></label><select name="leadId"><option value="">— Direct buyer —</option>${DB.leads.map((l: any) => `<option value="${l.id}" ${v.leadId === l.id ? "selected" : ""}>${l.name}</option>`).join("")}</select></div>
         <div class="field"><label>Unit *</label><select name="unitId" required>${DB.units.map((u: any) => `<option value="${u.id}" ${v.unitId === u.id ? "selected" : ""}>${u.unitNo} — ${projectById(u.projectId)?.name} (${u.id})</option>`).join("")}</select></div>
-        <div class="field"><label>Realtor *</label><select name="realtorId" required>${DB.realtors.map((r: any) => `<option value="${r.id}" ${v.realtorId === r.id ? "selected" : ""}>${r.name}</option>`).join("")}</select></div>
+        <div class="field"><label>Realtor *</label><select name="realtorId" required onchange="prefillRate(this.value)">${DB.realtors.map((r: any) => `<option value="${r.id}" ${v.realtorId === r.id ? "selected" : ""}>${r.name}</option>`).join("")}</select></div>
         <div class="field"><label>Booking Date *</label><input type="date" name="bookingDate" required value="${v.bookingDate}"></div>
         <div class="field"><label>Sale Value (₹) *</label><input type="number" name="saleValue" required value="${v.saleValue}"></div>
         <div class="field"><label>Token / Booking Amount (₹)</label><input type="number" name="tokenAmount" value="${v.tokenAmount}"></div>
@@ -1259,6 +1413,11 @@ function openBookingForm(id?: any) {
     </form>
   `);
 }
+function prefillRate(realtorId: string) {
+  const r = realtorById(realtorId);
+  const input = document.querySelector<HTMLInputElement>('#modal input[name="commissionRate"]');
+  if (r && input && !document.querySelector('#modal [data-editing-booking]')) input.value = String(r.commissionRate);
+}
 function submitBooking(e: Event, existingId: any) {
   e.preventDefault();
   if (!canEdit("bookings")) return false;
@@ -1271,9 +1430,7 @@ function submitBooking(e: Event, existingId: any) {
     Object.assign(DB.bookings.find((x: any) => x.id === existingId), data);
     toast("Booking updated");
   } else {
-    DB.bookings.push({ id: uid("BK", ++DB.counters.booking), ...data });
-    const u = unitById(data.unitId);
-    if (u) u.status = "Sold";
+    DB.bookings.push({ id: nextId("booking", "BK"), ...data });
     toast("Booking added");
   }
   save();
@@ -1292,13 +1449,13 @@ function deleteBooking(id: any) {
 
 /* ---------------------------- COMMISSIONS ---------------------------------- */
 function renderCommissions() {
-  const totalExpected = DB.bookings.reduce((s: number, x: any) => s + Number(x.commissionAmount || 0), 0);
-  const totalReceived = DB.bookings.filter((x: any) => x.commissionStatus === "Received").reduce((s: number, x: any) => s + Number(x.commissionAmount || 0), 0);
+  const totalExpected = liveBookings().reduce((s: number, x: any) => s + Number(x.commissionAmount || 0), 0);
+  const totalReceived = liveBookings().filter((x: any) => x.commissionStatus === "Received").reduce((s: number, x: any) => s + Number(x.commissionAmount || 0), 0);
   const totalPending = totalExpected - totalReceived;
 
   const byRealtor = DB.realtors
     .map((r: any) => {
-      const bs = DB.bookings.filter((b: any) => b.realtorId === r.id);
+      const bs = liveBookings().filter((b: any) => b.realtorId === r.id);
       const expected = bs.reduce((s: number, x: any) => s + Number(x.commissionAmount || 0), 0);
       const received = bs.filter((x: any) => x.commissionStatus === "Received").reduce((s: number, x: any) => s + Number(x.commissionAmount || 0), 0);
       return { r, count: bs.length, expected, received, pending: expected - received };
@@ -1332,7 +1489,7 @@ function renderCommissions() {
       <div class="table-wrap"><table>
         <thead><tr><th>Booking</th><th>Realtor</th><th>Sale Value</th><th>Rate</th><th>Commission</th><th>Status</th><th>Booking Date</th></tr></thead>
         <tbody>
-        ${DB.bookings.map((b: any) => `<tr>
+        ${liveBookings().map((b: any) => `<tr>
           <td class="cell-strong">${b.id}</td>
           <td>${esc(realtorById(b.realtorId)?.name || "—")}</td>
           <td>${formatCr(b.saleValue)}</td><td>${b.commissionRate}%</td>
@@ -1354,9 +1511,9 @@ function renderCommissions() {
 function publishGlobals() {
   Object.assign(window as any, {
     render,
-    resetDemoData,
+    prefillRate,
     viewProject,
-    openProjectForm, submitProject, deleteProject,
+    openProjectForm, submitProject, deleteProject, uploadProjectFiles, removeProjectFile, openShareProject, sendProjectWhatsApp,
     openUnitForm, submitUnit, deleteUnit,
     openLeadForm, submitLead, deleteLead,
     openRealtorForm, submitRealtor, deleteRealtor,
@@ -1371,7 +1528,6 @@ export function mountErp(view: ErpView, permissions: Permissions) {
   currentView = view;
   PERMS = permissions;
   publishGlobals();
-  load();
 
   if (!overlayListenerAttached) {
     document.getElementById("overlay")?.addEventListener("click", (e) => {
@@ -1380,5 +1536,28 @@ export function mountErp(view: ErpView, permissions: Permissions) {
     overlayListenerAttached = true;
   }
 
-  render();
+  const root = document.getElementById("view-root");
+  if (root) root.innerHTML = `<div class="cell-muted" style="padding:30px;">Loading…</div>`;
+  load().then(
+    () => {
+      try {
+        render();
+      } catch (err) {
+        console.error("ERP render failed", err);
+        if (root) root.innerHTML = `<div class="cell-muted" style="padding:30px;">Something went wrong showing this page. Please refresh.</div>`;
+      }
+    },
+    () => {
+      if (root) root.innerHTML = `<div class="cell-muted" style="padding:30px;">Could not load data. Please refresh the page.</div>`;
+    }
+  );
+
+  // Pick up changes made by other users.
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => {
+    if (!document.hidden) void refresh();
+  }, 15000);
+  document.onvisibilitychange = () => {
+    if (!document.hidden) void refresh();
+  };
 }

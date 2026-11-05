@@ -7,7 +7,7 @@ import { SESSION_COOKIE } from "@/lib/session";
 // check (which needs a fresh DB read) happens in the page/layout Server
 // Components via requireUser()/requireModule() — this just keeps
 // unauthenticated requests from reaching the app shell at all.
-const PUBLIC_PATHS = ["/login"];
+const PUBLIC_PATHS = ["/login", "/share"];
 
 function getSecretKey() {
   return new TextEncoder().encode(process.env.SESSION_SECRET);
@@ -17,6 +17,11 @@ export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
+    return NextResponse.next();
+  }
+
+  // Signed share links for uploaded files are verified inside the route itself.
+  if (pathname.startsWith("/api/files/") && req.nextUrl.searchParams.has("s")) {
     return NextResponse.next();
   }
 

@@ -5,6 +5,9 @@
 /.next/
 /out/
 
+# uploaded files
+/uploads
+
 # production
 /build
 
