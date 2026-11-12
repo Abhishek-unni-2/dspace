@@ -8,6 +8,7 @@ type UserRow = {
   id: string;
   name: string;
   email: string;
+  phone: string;
   isActive: boolean;
   roleId: string;
   roleName: string;
@@ -46,6 +47,10 @@ function CreateUserForm({ roles, onDone }: { roles: RoleOption[]; onDone: () => 
           <div className="field">
             <label>Email *</label>
             <input name="email" type="email" required />
+          </div>
+          <div className="field">
+            <label>Mobile (for lead SMS alerts)</label>
+            <input name="phone" type="tel" placeholder="98765 43210" />
           </div>
           <div className="field">
             <label>Temporary Password *</label>
@@ -100,6 +105,10 @@ function EditUserForm({ user, roles, onDone }: { user: UserRow; roles: RoleOptio
             <div className="field">
               <label>Email *</label>
               <input name="email" type="email" required defaultValue={user.email} />
+            </div>
+            <div className="field">
+              <label>Mobile (for lead SMS alerts)</label>
+              <input name="phone" type="tel" placeholder="98765 43210" defaultValue={user.phone} />
             </div>
             <div className="field">
               <label>Role *</label>
@@ -179,6 +188,7 @@ export default function UsersManager({
               <tr>
                 <th>Name</th>
                 <th>Email</th>
+                <th>Mobile</th>
                 <th>Role</th>
                 <th>Status</th>
                 <th></th>
@@ -191,6 +201,7 @@ export default function UsersManager({
                     {u.name} {u.id === currentUserId ? <span className="cell-muted">(you)</span> : null}
                   </td>
                   <td className="cell-muted">{u.email}</td>
+                  <td className="cell-muted">{u.phone ? `+${u.phone}` : "—"}</td>
                   <td>
                     {u.roleName} {u.isAdmin ? <span className="badge badge-gold" style={{ marginLeft: 6 }}>Admin</span> : null}
                   </td>

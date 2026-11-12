@@ -1,6 +1,7 @@
 import "server-only";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
+import { sendLeadAlerts } from "@/lib/sms";
 import { activityLog, erpCounters, erpRecords, roles, users } from "@/db/schema";
 
 // One-way import of Meta (Facebook / Instagram) lead-ad rows from a Google
@@ -70,6 +71,7 @@ export type SheetSyncResult = {
   skippedTest: number;
   skippedOld: number;
   projectsCreated?: number;
+  sms?: { sent: number; failed: number; errors?: string[] };
   assigned?: number;
 };
 
@@ -197,12 +199,19 @@ export async function syncLeadsFromSheet(sheetId: string, fromDate: string): Pro
 
   // Round-robin across active users whose role is marked "receives leads".
   const team = await db
-    .select({ id: users.id, name: users.name })
+    .select({ id: users.id, name: users.name, phone: users.phone })
     .from(users)
     .innerJoin(roles, eq(users.roleId, roles.id))
     .where(and(eq(users.isActive, true), eq(roles.receivesLeads, true)))
     .orderBy(users.createdAt, users.id);
   const today = new Date().toISOString().slice(0, 10);
+  // Who was handed what in this run → one SMS per person at the end.
+  const handed = new Map<string, { phone: string; count: number; firstLead: string }>();
+  const noteHanded = (u: { id: string; phone: string }, leadName: string) => {
+    const h = handed.get(u.id) ?? { phone: u.phone, count: 0, firstLead: leadName };
+    h.count++;
+    handed.set(u.id, h);
+  };
   const reserveRotation = async (n: number) => {
     const [rr] = await db
       .insert(erpCounters)
@@ -224,6 +233,7 @@ export async function syncLeadsFromSheet(sheetId: string, fromDate: string): Pro
     const cur = await reserveRotation(unassigned.length);
     for (let i = 0; i < unassigned.length; i++) {
       const u = team[(cur + i) % team.length];
+      noteHanded(u, String(unassigned[i].name || ""));
       const data: Rec = { ...unassigned[i], assignedTo: u.id, assignedToName: u.name, assignedDate: today, status: "Assigned" };
       await db.update(erpRecords).set({ data, updatedAt: new Date(), updatedBy: AUTHOR }).where(and(eq(erpRecords.collection, "leads"), eq(erpRecords.id, String(unassigned[i].id))));
     }
@@ -252,6 +262,7 @@ export async function syncLeadsFromSheet(sheetId: string, fromDate: string): Pro
       const data: Rec = { ...p.data, id };
       if (team.length) {
         const u = team[(cursor + i) % team.length];
+        noteHanded(u, String(data.name || ""));
         Object.assign(data, { assignedTo: u.id, assignedToName: u.name, assignedDate: today, status: "Assigned" });
       }
       return { collection: "leads", id, data, updatedBy: AUTHOR };
@@ -268,5 +279,13 @@ export async function syncLeadsFromSheet(sheetId: string, fromDate: string): Pro
     result.imported = values.length;
   }
   result.projectsCreated = newProjects.length;
+
+  if (handed.size) {
+    const sms = await sendLeadAlerts([...handed.values()]);
+    result.sms = { sent: sms.sent, failed: sms.failed, ...(sms.errors.length ? { errors: sms.errors.slice(0, 3) } : {}) };
+    if (sms.failed) {
+      await db.insert(activityLog).values({ userName: AUTHOR, action: "auto", collection: "leads", recordId: "-", summary: `SMS alert failed for ${sms.failed} user(s): ${sms.errors[0] ?? ""}`.slice(0, 300) });
+    }
+  }
   return result;
 }

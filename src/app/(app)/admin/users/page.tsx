@@ -12,6 +12,7 @@ export default async function UsersPage() {
       id: users.id,
       name: users.name,
       email: users.email,
+      phone: users.phone,
       isActive: users.isActive,
       roleId: users.roleId,
       roleName: roles.name,
