@@ -26,8 +26,11 @@ async function handle(req: Request) {
   }
   const sheetId = process.env.LEADS_SHEET_ID;
   if (!sheetId) return Response.json({ error: "LEADS_SHEET_ID is not set" }, { status: 500 });
-  const fromDate = process.env.LEADS_SYNC_FROM;
-  if (!fromDate || !/^\d{4}-\d{2}-\d{2}$/.test(fromDate)) return Response.json({ error: "LEADS_SYNC_FROM (YYYY-MM-DD) is not set" }, { status: 500 });
+  // Automatic window: every sync looks at leads from the last few days. Rows
+  // already imported are skipped, so nothing is duplicated and no date ever
+  // needs to be set by hand. (Optional: LEADS_SYNC_DAYS, default 3.)
+  const days = Math.min(Math.max(Number(process.env.LEADS_SYNC_DAYS) || 3, 1), 365);
+  const fromDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
   try {
     return Response.json(await syncLeadsFromSheet(sheetId, fromDate));
   } catch (e) {
