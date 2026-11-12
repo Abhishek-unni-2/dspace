@@ -8,6 +8,8 @@ export const roles = pgTable(
     name: text("name").notNull(),
     description: text("description").notNull().default(""),
     isAdmin: boolean("is_admin").notNull().default(false),
+    // Users in this role are in the rotation for auto-assigned leads.
+    receivesLeads: boolean("receives_leads").notNull().default(false),
     permissions: jsonb("permissions").$type<Permissions>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

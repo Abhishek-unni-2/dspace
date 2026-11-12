@@ -1,7 +1,7 @@
 import "server-only";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { activityLog, erpCounters, erpRecords } from "@/db/schema";
+import { activityLog, erpCounters, erpRecords, users } from "@/db/schema";
 import type { ModuleKey } from "@/lib/permissions";
 
 export type Collection = "projects" | "units" | "leads" | "realtors" | "visits" | "bookings";
@@ -21,12 +21,24 @@ export type Change = { collection: Collection; id: string; op: "put" | "delete";
 
 type Rec = Record<string, any>;
 
-export async function loadAll() {
+export type Viewer = { id: string; name: string; isAdmin: boolean };
+
+// Administrators see everything. Everyone else only sees the leads assigned to
+// them, plus the site visits / bookings / activity that belong to those leads.
+export async function loadAll(viewer?: Viewer) {
   const rows = await db.select().from(erpRecords).orderBy(erpRecords.createdAt, erpRecords.id);
   const out: Record<Collection, Rec[]> = { projects: [], units: [], leads: [], realtors: [], visits: [], bookings: [] };
   for (const r of rows) if (isCollection(r.collection)) out[r.collection].push(r.data);
-  const activity = await db.select().from(activityLog).orderBy(desc(activityLog.id)).limit(30);
-  return { collections: out, activity };
+  let activity = await db.select().from(activityLog).orderBy(desc(activityLog.id)).limit(viewer && !viewer.isAdmin ? 300 : 30);
+  if (viewer && !viewer.isAdmin) {
+    out.leads = out.leads.filter((l) => l.assignedTo === viewer.id);
+    const mine = new Set(out.leads.map((l) => l.id));
+    out.visits = out.visits.filter((v) => mine.has(v.leadId));
+    out.bookings = out.bookings.filter((b) => !b.leadId || mine.has(b.leadId));
+    activity = activity.filter((a) => a.userName === viewer.name || (a.collection === "leads" && mine.has(a.recordId))).slice(0, 30);
+  }
+  const people = await db.select({ id: users.id, name: users.name }).from(users).where(eq(users.isActive, true)).orderBy(users.name);
+  return { collections: out, activity, users: people };
 }
 
 async function getRecs(collection: Collection): Promise<Rec[]> {
@@ -53,6 +65,9 @@ function nameOf(collection: Collection, d: Rec) {
     default: return d.name || "";
   }
 }
+
+// Lead statuses before a site visit is booked.
+const EARLY_LEAD_STATUSES = ["New", "Assigned", "Not Connected 1", "Not Connected 2", "Call Back", "Contacted"];
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const addDaysISO = (n: number) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
@@ -193,13 +208,13 @@ async function runAutomations(
       const next = { ...lead };
       const reasons: string[] = [];
 
-      if (visitLeadIds.has(lid) && !["Converted", "Lost"].includes(next.status)) {
+      if (visitLeadIds.has(lid) && !["Converted", "Lost", "Closed"].includes(next.status)) {
         const mine = visits.filter((v) => v.leadId === lid);
         const hasScheduled = mine.some((v) => v.status === "Scheduled");
         const hasCompleted = mine.some((v) => v.status === "Completed Visit");
-        if (hasScheduled && ["New", "Contacted"].includes(next.status)) {
+        if (hasScheduled && EARLY_LEAD_STATUSES.includes(next.status)) {
           next.status = "Site Visit Scheduled";
-        } else if (!hasScheduled && hasCompleted && ["New", "Contacted", "Site Visit Scheduled"].includes(next.status)) {
+        } else if (!hasScheduled && hasCompleted && [...EARLY_LEAD_STATUSES, "Site Visit Scheduled"].includes(next.status)) {
           next.status = "Negotiation";
         } else if (!hasScheduled && next.status === "Site Visit Scheduled") {
           next.status = "Contacted";

@@ -110,7 +110,12 @@ const STATUS_KIND: Record<string, string> = {
   Sold: "blue",
   Hold: "red",
   New: "blue",
+  Assigned: "gold",
   Contacted: "amber",
+  "Not Connected 1": "red",
+  "Not Connected 2": "red",
+  "Call Back": "amber",
+  Closed: "slate",
   "Site Visit Scheduled": "gold",
   Negotiation: "amber",
   Converted: "green",
@@ -138,6 +143,8 @@ function stBadge(text: string) {
 const KEYS = ["projects", "units", "leads", "realtors", "visits", "bookings"] as const;
 let BASE: Record<string, string> = {}; // "collection/id" -> JSON as last known on the server
 let ACTIVITY: any[] = [];
+let USERS: { id: string; name: string }[] = [];
+let ME: { id: string; name: string; isAdmin?: boolean } | null = null;
 let ID_POOL: Record<string, { next: number; end: number }> = {};
 let pendingSyncs = 0;
 let syncChain: Promise<void> = Promise.resolve();
@@ -152,6 +159,8 @@ function snapshot(db: any) {
 function applyRemote(data: any, raw: string) {
   DB = { ...data.collections };
   ACTIVITY = data.activity || [];
+  USERS = data.users || USERS;
+  if (data.me) ME = data.me;
   BASE = snapshot(DB);
   lastRemote = raw;
 }
@@ -330,8 +339,11 @@ function renderDashboard() {
     .sort((a: any, b: any) => +new Date(a.date) - +new Date(b.date))
     .slice(0, 5);
 
+  const myToday = ME ? DB.leads.filter((l: any) => l.assignedTo === ME!.id && (l.assignedDate === todayISO() || (isToday(l.createdDate) && !l.assignedDate))) : [];
+  const myOpen = ME ? DB.leads.filter((l: any) => l.assignedTo === ME!.id && !["Converted", "Lost", "Closed"].includes(l.status)).length : 0;
+
   const overdueLeads = DB.leads
-    .filter((l: any) => l.followUpDate && l.followUpDate < todayISO() && !["Converted", "Lost"].includes(l.status))
+    .filter((l: any) => l.followUpDate && l.followUpDate < todayISO() && !["Converted", "Lost", "Closed"].includes(l.status))
     .sort((a: any, b: any) => (a.followUpDate < b.followUpDate ? -1 : 1))
     .slice(0, 6);
 
@@ -376,6 +388,17 @@ function renderDashboard() {
       ${kpi("Reserved Units", m.reservedUnits, "pending confirmation", "amber")}
       ${kpi("Sold Units", m.soldUnits, "closed sales", "blue")}
       ${kpi("On-Hold Units", m.onHoldUnits, "temporarily blocked", "red")}
+    </div>
+
+    <div class="section-title">Your Leads Today</div>
+    <div class="mini-panel" style="margin-bottom:6px;">
+      <h3>${myToday.length} new lead${myToday.length === 1 ? "" : "s"} assigned to you today <span class="cell-muted" style="font-weight:500;">· ${myOpen} open in total</span></h3>
+      ${myToday.map((l: any) => `
+        <div class="rank-row">
+          <div class="rank-badge">${esc(String(l.name || "?").slice(0, 1).toUpperCase())}</div>
+          <div class="rank-name">${esc(l.name)}<div class="cell-muted" style="font-size:11px;"><a href="tel:${esc(l.phone)}">${esc(l.phone)}</a> · ${esc(projectById(l.projectId)?.name || "General inquiry")}${l.platform ? " · " + esc(l.platform) : ""}</div></div>
+          ${stBadge(l.status)}
+        </div>`).join("") || `<div class="cell-muted" style="padding:10px 0;">No new leads assigned to you today.</div>`}
     </div>
 
     <div class="section-title">Leads &amp; Site Visits</div>
@@ -1043,28 +1066,111 @@ function deleteUnit(id: any) {
 
 /* ---------------------------- LEADS ---------------------------------- */
 const LEAD_SOURCES = ["Website", "Referral", "Walk-in", "Social Media", "Call", "Campaign", "Site Visit Walk-in"];
-const LEAD_STATUSES = ["New", "Contacted", "Site Visit Scheduled", "Negotiation", "Converted", "Lost"];
-let leadFilter = { status: "", realtor: "", q: "" };
+const LEAD_STATUSES = ["New", "Assigned", "Not Connected 1", "Not Connected 2", "Call Back", "Contacted", "Site Visit Scheduled", "Negotiation", "Converted", "Lost", "Closed"];
+let leadFilter = { status: "", realtor: "", assignee: "", q: "", view: "board", range: "", from: "", to: "" };
+
+// [from, to] (inclusive, YYYY-MM-DD) for the selected date filter, by lead created date.
+function leadDateRange(): [string, string] | null {
+  const t = todayISO();
+  switch (leadFilter.range) {
+    case "today": return [t, t];
+    case "yesterday": return [addDays(-1), addDays(-1)];
+    case "7d": return [addDays(-6), t];
+    case "30d": return [addDays(-29), t];
+    case "month": return [t.slice(0, 8) + "01", t];
+    case "custom": return leadFilter.from || leadFilter.to ? [leadFilter.from || "0000-00-00", leadFilter.to || "9999-99-99"] : null;
+    default: return null;
+  }
+}
+
+function setLeadStatus(id: any, status: string) {
+  if (!canEdit("leads")) return;
+  const l = leadById(id);
+  if (!l || l.status === status) return;
+  // A site visit needs an actual visit record (date, time, project) — open the
+  // visit form for this lead; the lead moves to this column once it is saved.
+  if (status === "Site Visit Scheduled") {
+    if (!canEdit("visits")) {
+      toast("You need Site Visits access to schedule a visit");
+    } else {
+      openVisitForm(undefined, id);
+    }
+    render(); // put the dropdown back until the visit is saved
+    return;
+  }
+  l.status = status;
+  save();
+  toast(`${l.name} → ${status}`);
+  render();
+}
+const initials = (n: string) => String(n || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
+
+function leadBoard(list: any[], editable: boolean) {
+  const cols = LEAD_STATUSES.map((st) => ({ st, items: list.filter((l: any) => l.status === st) }));
+  return `
+    <div class="lead-flow-head"><b>Lead flow</b><span class="cell-muted"> · ${list.length} lead${list.length === 1 ? "" : "s"} · move each lead along as it progresses</span></div>
+    <div class="kanban">
+      ${cols.map((c) => `
+        <div class="kan-col">
+          <div class="kan-col-head"><span>${esc(c.st)}</span><span class="kan-count">${c.items.length}</span></div>
+          ${c.items.map((l: any) => `
+            <div class="kan-card" onclick="viewLead('${l.id}')">
+              <div class="kan-name">${esc(l.name)}</div>
+              <div class="kan-tags">
+                <span class="kan-tag kan-tag-proj">${esc(projectById(l.projectId)?.name || "General inquiry")}</span>
+                ${l.platform || l.source ? `<span class="kan-tag">${esc(l.platform || l.source)}</span>` : ""}
+              </div>
+              <div class="kan-phone"><a href="tel:${esc(l.phone)}">${esc(l.phone)}</a></div>
+              <div class="kan-meta">
+                <span class="kan-user">${l.assignedToName ? `<span class="kan-avatar">${esc(initials(l.assignedToName))}</span>${esc(l.assignedToName)}` : `<span class="cell-muted">Unassigned</span>`}</span>
+                <span class="cell-muted">${esc(formatDate(l.createdDate).replace(/ \d{4}$/, ""))}</span>
+              </div>
+              <div class="kan-actions" onclick="event.stopPropagation()">
+                <select ${editable ? "" : "disabled"} onchange="setLeadStatus('${l.id}', this.value)">
+                  ${LEAD_STATUSES.map((s) => `<option ${l.status === s ? "selected" : ""}>${s}</option>`).join("")}
+                </select>
+                ${editable ? `<button class="btn-ghost btn-sm" onclick="openLeadForm('${l.id}')" title="Edit">✎</button>` : ""}
+              </div>
+            </div>`).join("") || `<div class="kan-empty">None</div>`}
+        </div>`).join("")}
+    </div>`;
+}
 
 function renderLeads() {
-  const list = DB.leads.filter(
+  const rng = leadDateRange();
+  const filtered = [...DB.leads].sort((a: any, b: any) => String(b.createdDate || "").localeCompare(String(a.createdDate || "")) || String(b.id).localeCompare(String(a.id))).filter(
     (l: any) =>
       (!leadFilter.status || l.status === leadFilter.status) &&
       (!leadFilter.realtor || l.realtorId === leadFilter.realtor) &&
+      (!leadFilter.assignee || (leadFilter.assignee === "none" ? !l.assignedTo : l.assignedTo === leadFilter.assignee)) &&
       (!leadFilter.q || (l.name + l.phone + l.email).toLowerCase().includes(leadFilter.q.toLowerCase()))
   );
+  const list = rng ? filtered.filter((l: any) => l.createdDate >= rng[0] && l.createdDate <= rng[1]) : filtered;
   const editable = canEdit("leads");
   return `
     <div class="panel">
       <div class="panel-head">
         <h2>All Leads <span class="cell-muted" style="font-weight:500;">(${list.length})</span></h2>
+        <div class="seg">
+          <button class="${leadFilter.view === "board" ? "on" : ""}" onclick="leadFilter.view='board'; render();">Board</button>
+          <button class="${leadFilter.view === "table" ? "on" : ""}" onclick="leadFilter.view='table'; render();">Table</button>
+        </div>
         <div class="spacer"></div>
         <div class="filter-row">
           <input placeholder="Search name / phone / email…" value="${esc(leadFilter.q)}" oninput="leadFilter.q=this.value; render();">
+          <select onchange="leadFilter.range=this.value; render();">
+            ${[["", "All dates"], ["today", "Today"], ["yesterday", "Yesterday"], ["7d", "Last 7 days"], ["30d", "Last 30 days"], ["month", "This month"], ["custom", "Custom range…"]].map(([v, t]) => `<option value="${v}" ${leadFilter.range === v ? "selected" : ""}>${t}</option>`).join("")}
+          </select>
+          ${leadFilter.range === "custom" ? `<input type="date" value="${leadFilter.from}" onchange="leadFilter.from=this.value; render();" title="From"><input type="date" value="${leadFilter.to}" onchange="leadFilter.to=this.value; render();" title="To">` : ""}
           <select onchange="leadFilter.status=this.value; render();">
             <option value="">All statuses</option>
             ${LEAD_STATUSES.map((s) => `<option ${leadFilter.status === s ? "selected" : ""}>${s}</option>`).join("")}
           </select>
+          ${ME?.isAdmin ? `<select onchange="leadFilter.assignee=this.value; render();">
+            <option value="">All assignees</option>
+            <option value="none" ${leadFilter.assignee === "none" ? "selected" : ""}>Unassigned</option>
+            ${USERS.map((u) => `<option value="${u.id}" ${leadFilter.assignee === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
+          </select>` : ""}
           <select onchange="leadFilter.realtor=this.value; render();">
             <option value="">All realtors</option>
             ${DB.realtors.map((r: any) => `<option value="${r.id}" ${leadFilter.realtor === r.id ? "selected" : ""}>${r.name}</option>`).join("")}
@@ -1072,16 +1178,17 @@ function renderLeads() {
         </div>
         ${editable ? `<button class="btn btn-navy" onclick="openLeadForm()">+ Add Lead</button>` : ""}
       </div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Lead</th><th>Contact</th><th>Source</th><th>Interested Project</th><th>Budget</th><th>Status</th><th>Realtor</th><th>Follow-up</th><th>Created</th><th></th></tr></thead>
+      ${leadFilter.view === "board" ? leadBoard(list, editable) : `<div class="table-wrap"><table>
+        <thead><tr><th>Lead</th><th>Contact</th><th>Source</th><th>Interested Project</th><th>Budget</th><th>Status</th><th>Assigned To</th><th>Realtor</th><th>Follow-up</th><th>Created</th><th></th></tr></thead>
         <tbody>
         ${list.map((l: any) => `<tr>
-          <td class="cell-strong">${esc(l.name)}</td>
+          <td class="cell-strong"><a href="#" class="lead-link" onclick="viewLead('${l.id}'); return false;">${esc(l.name)}</a></td>
           <td class="cell-muted">${esc(l.phone)}<br>${esc(l.email)}</td>
           <td>${badge(l.source, "slate")}</td>
           <td>${esc(projectById(l.projectId)?.name || "General inquiry")}</td>
           <td>${esc(l.budget)}</td>
           <td>${stBadge(l.status)}</td>
+          <td>${esc(l.assignedToName || "—")}</td>
           <td>${esc(realtorById(l.realtorId)?.name || "—")}</td>
           <td class="${isToday(l.followUpDate) ? "" : "cell-muted"}">${l.followUpDate ? formatDate(l.followUpDate) : "—"}${isToday(l.followUpDate) ? ' <b style="color:var(--amber)">· today</b>' : ""}</td>
           <td class="cell-muted">${formatDate(l.createdDate)}</td>
@@ -1089,11 +1196,51 @@ function renderLeads() {
             ${editable ? `<button class="btn-ghost btn-sm" onclick="openLeadForm('${l.id}')" title="Edit">✎</button>
             <button class="btn-danger-ghost btn-sm" onclick="deleteLead('${l.id}')" title="Delete">🗑</button>` : ""}
           </td>
-        </tr>`).join("") || `<tr><td colspan="10">${emptyRow()}</td></tr>`}
+        </tr>`).join("") || `<tr><td colspan="11">${emptyRow()}</td></tr>`}
         </tbody>
-      </table></div>
+      </table></div>`}
     </div>
   `;
+}
+function viewLead(id: any) {
+  const l = leadById(id);
+  if (!l) return;
+  const visits = DB.visits.filter((v: any) => v.leadId === id);
+  const bookings = DB.bookings.filter((b: any) => b.leadId === id);
+  const row = (label: string, value: any) => `<div class="dt-item"><div class="dt-label">${label}</div><div class="dt-value">${value || '<span class="cell-muted">—</span>'}</div></div>`;
+  openModal(`
+    <div class="modal-head">
+      <div><h3>${esc(l.name)}</h3><div class="sub">${l.id} · created ${formatDate(l.createdDate)}</div></div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="margin-bottom:14px;">${stBadge(l.status)}</div>
+      <div class="detail-grid">
+        ${row("Phone", l.phone ? `<a href="tel:${esc(l.phone)}">${esc(l.phone)}</a> · <a href="https://wa.me/${esc(String(l.phone).replace(/\D/g, ""))}" target="_blank" rel="noopener">WhatsApp</a>` : "")}
+        ${row("Email", l.email ? `<a href="mailto:${esc(l.email)}">${esc(l.email)}</a>` : "")}
+        ${row("Assigned to", esc(l.assignedToName || ""))}
+        ${row("Assigned on", l.assignedDate ? formatDate(l.assignedDate) : "")}
+        ${row("Interested project", esc(projectById(l.projectId)?.name || "General inquiry"))}
+        ${row("Budget", esc(l.budget))}
+        ${row("Source", esc(l.source))}
+        ${row("Platform", esc(l.platform))}
+        ${row("Campaign", esc(l.campaign))}
+        ${row("Sheet tab", esc(l.sheetTab))}
+        ${row("Realtor", esc(realtorById(l.realtorId)?.name || ""))}
+        ${row("Follow-up date", l.followUpDate ? formatDate(l.followUpDate) : "")}
+      </div>
+      <div class="dt-label" style="margin-top:16px;">Notes</div>
+      <div class="dt-notes">${esc(l.notes) || '<span class="cell-muted">No notes</span>'}</div>
+      <div class="dt-label" style="margin-top:16px;">Site visits (${visits.length})</div>
+      ${visits.map((v: any) => `<div class="rank-row"><div class="rank-name">${formatDate(v.date)} · ${esc(v.time || "")}<div class="cell-muted" style="font-size:11px;">${esc(projectById(v.projectId)?.name || "")}</div></div>${stBadge(v.status)}</div>`).join("") || `<div class="cell-muted" style="font-size:12.5px;">None yet</div>`}
+      <div class="dt-label" style="margin-top:16px;">Bookings (${bookings.length})</div>
+      ${bookings.map((b: any) => `<div class="rank-row"><div class="rank-name">${formatDate(b.bookingDate)} · ${formatINR(b.saleValue)}</div>${stBadge(b.status)}</div>`).join("") || `<div class="cell-muted" style="font-size:12.5px;">None yet</div>`}
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-outline" onclick="closeModal()">Close</button>
+      ${canEdit("leads") ? `<button type="button" class="btn btn-navy" onclick="openLeadForm('${l.id}')">Edit Lead</button>` : ""}
+    </div>
+  `);
 }
 function openLeadForm(id?: any) {
   if (!canEdit("leads")) return;
@@ -1114,6 +1261,7 @@ function openLeadForm(id?: any) {
         <div class="field"><label>Interested Project</label><select name="projectId"><option value="">General inquiry</option>${DB.projects.map((p: any) => `<option value="${p.id}" ${v.projectId === p.id ? "selected" : ""}>${p.name}</option>`).join("")}</select></div>
         <div class="field"><label>Budget Range</label><input name="budget" value="${esc(v.budget)}" placeholder="e.g. 60 L – 80 L"></div>
         <div class="field"><label>Status</label><select name="status">${LEAD_STATUSES.map((s) => `<option ${v.status === s ? "selected" : ""}>${s}</option>`).join("")}</select></div>
+        ${ME?.isAdmin ? `<div class="field"><label>Assigned To (team member)</label><select name="assignedTo"><option value="">— Unassigned —</option>${USERS.map((u) => `<option value="${u.id}" ${v.assignedTo === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select></div>` : ""}
         <div class="field"><label>Assigned Realtor</label><select name="realtorId"><option value="">— Unassigned —</option>${DB.realtors.map((r: any) => `<option value="${r.id}" ${v.realtorId === r.id ? "selected" : ""}>${r.name}</option>`).join("")}</select></div>
         <div class="field"><label>Follow-up Date</label><input type="date" name="followUpDate" value="${v.followUpDate}"></div>
         <div class="field full"><label>Notes</label><textarea name="notes">${esc(v.notes)}</textarea></div>
@@ -1130,12 +1278,16 @@ function submitLead(e: Event, existingId: any) {
   e.preventDefault();
   if (!canEdit("leads")) return false;
   const f = new FormData(e.target as HTMLFormElement);
-  const data = { name: f.get("name"), phone: f.get("phone"), email: f.get("email"), source: f.get("source"), projectId: f.get("projectId") || "", budget: f.get("budget"), status: f.get("status"), realtorId: f.get("realtorId") || "", followUpDate: f.get("followUpDate"), notes: f.get("notes") };
+  const data: any = { name: f.get("name"), phone: f.get("phone"), email: f.get("email"), source: f.get("source"), projectId: f.get("projectId") || "", budget: f.get("budget"), status: f.get("status"), realtorId: f.get("realtorId") || "", followUpDate: f.get("followUpDate"), notes: f.get("notes") };
+  const who = ME?.isAdmin ? USERS.find((u) => u.id === f.get("assignedTo")) : ME;
+  Object.assign(data, { assignedTo: who?.id || "", assignedToName: who?.name || "" });
   if (existingId) {
-    Object.assign(leadById(existingId), data);
+    const prev: any = leadById(existingId);
+    if (data.assignedTo && data.assignedTo !== prev.assignedTo) data.assignedDate = todayISO();
+    Object.assign(prev, data);
     toast("Lead updated");
   } else {
-    DB.leads.push({ id: nextId("lead", "LD"), ...data, createdDate: todayISO() });
+    DB.leads.push({ id: nextId("lead", "LD"), ...data, createdDate: todayISO(), ...(data.assignedTo ? { assignedDate: todayISO() } : {}) });
     toast("Lead added");
   }
   save();
@@ -1302,10 +1454,11 @@ function renderVisits() {
     </div>
   `;
 }
-function openVisitForm(id?: any) {
+function openVisitForm(id?: any, leadId?: any) {
   if (!canEdit("visits")) return;
   const vi = id ? DB.visits.find((x: any) => x.id === id) : null;
-  const v = vi || { leadId: "", projectId: DB.projects[0]?.id || "", unitId: "", realtorId: "", date: todayISO(), time: "11:00 AM", status: "Scheduled", feedback: "" };
+  const pl: any = leadId ? leadById(leadId) : null;
+  const v = vi || { leadId: leadId || "", projectId: pl?.projectId || DB.projects[0]?.id || "", unitId: "", realtorId: pl?.realtorId || "", date: todayISO(), time: "11:00 AM", status: "Scheduled", feedback: "" };
   openModal(`
     <div class="modal-head">
       <div><h3>${vi ? "Edit Site Visit" : "Add Site Visit"}</h3><div class="sub">${vi ? vi.id : "New Site Visit"}</div></div>
@@ -1341,6 +1494,8 @@ function submitVisit(e: Event, existingId: any) {
     toast("Site visit updated");
   } else {
     DB.visits.push({ id: nextId("visit", "SV"), ...data });
+    const vl: any = leadById(data.leadId);
+    if (vl && data.status === "Scheduled" && !["Converted", "Lost", "Closed"].includes(vl.status)) vl.status = "Site Visit Scheduled";
     toast("Site visit scheduled");
   }
   save();
@@ -1537,7 +1692,7 @@ function publishGlobals() {
     viewProject,
     openProjectForm, submitProject, deleteProject, uploadProjectFiles, removeProjectFile, openShareProject, sendProjectWhatsApp,
     openUnitForm, submitUnit, deleteUnit,
-    openLeadForm, submitLead, deleteLead,
+    openLeadForm, viewLead, submitLead, deleteLead, setLeadStatus,
     openRealtorForm, submitRealtor, deleteRealtor,
     openVisitForm, submitVisit, deleteVisit,
     openBookingForm, submitBooking, deleteBooking,

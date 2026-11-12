@@ -38,6 +38,7 @@ export async function createRole(_prev: RoleFormState, formData: FormData): Prom
     name: parsed.data.name,
     description: parsed.data.description || "",
     isAdmin: false,
+    receivesLeads: formData.get("receivesLeads") === "on",
     permissions: permissionsFromFormData(formData),
   });
 
@@ -68,6 +69,7 @@ export async function updateRole(roleId: string, _prev: RoleFormState, formData:
       // The Administrator role always keeps full access to every module —
       // its permission grid is read-only in the UI, but this is guarded
       // server-side too so it can never be downgraded by a crafted request.
+      receivesLeads: formData.get("receivesLeads") === "on",
       permissions: role.isAdmin ? role.permissions : permissionsFromFormData(formData),
       updatedAt: new Date(),
     })

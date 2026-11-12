@@ -11,6 +11,7 @@ export default async function RolesPage() {
       name: roles.name,
       description: roles.description,
       isAdmin: roles.isAdmin,
+      receivesLeads: roles.receivesLeads,
       permissions: roles.permissions,
       userCount: sql<number>`(select count(*)::int from ${users} where ${users.roleId} = ${roles.id})`,
     })
