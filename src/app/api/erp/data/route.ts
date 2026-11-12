@@ -8,5 +8,5 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const user = await getCurrentUser();
   if (!user || !user.isActive) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  return Response.json(await loadAll());
+  return Response.json({ ...(await loadAll({ id: user.id, name: user.name, isAdmin: user.role.isAdmin })), me: { id: user.id, name: user.name, isAdmin: user.role.isAdmin } });
 }

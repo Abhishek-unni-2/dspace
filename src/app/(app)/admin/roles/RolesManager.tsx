@@ -10,6 +10,7 @@ type RoleRow = {
   name: string;
   description: string;
   isAdmin: boolean;
+  receivesLeads: boolean;
   permissions: Permissions;
   userCount: number;
 };
@@ -51,6 +52,14 @@ function RoleForm({ role, onDone }: { role: RoleRow | null; onDone: () => void }
               <input name="description" maxLength={300} defaultValue={role?.description} />
             </div>
           </div>
+        </div>
+
+        <div className="form-section">
+          <div className="form-section-title">Lead Assignment</div>
+          <label className="perm-radio">
+            <input type="checkbox" name="receivesLeads" defaultChecked={role?.receivesLeads ?? false} />
+            Auto-assign new leads to users in this role (shared equally, round-robin)
+          </label>
         </div>
 
         <div className="form-section">
@@ -143,7 +152,7 @@ export default function RolesManager({ roles }: { roles: RoleRow[] }) {
                 <th>Name</th>
                 <th>Description</th>
                 <th>Users</th>
-                <th></th>
+                <th>Gets leads</th>
                 <th></th>
               </tr>
             </thead>
@@ -155,7 +164,7 @@ export default function RolesManager({ roles }: { roles: RoleRow[] }) {
                   </td>
                   <td className="cell-muted">{r.description || "—"}</td>
                   <td>{r.userCount}</td>
-                  <td></td>
+                  <td>{r.receivesLeads ? <span className="badge badge-green">Yes</span> : <span className="cell-muted">—</span>}</td>
                   <td className="row-actions">
                     <button className="btn-ghost btn-sm" onClick={() => setEditing(r)} title="Edit">
                       ✎

@@ -25,6 +25,9 @@ export async function proxy(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // Scheduler endpoint: authenticated inside the route (bearer secret or user session).
+  if (pathname.startsWith("/api/cron/")) return NextResponse.next();
+
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   let valid = false;
   if (token) {
