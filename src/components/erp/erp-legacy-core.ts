@@ -1083,6 +1083,21 @@ function leadDateRange(): [string, string] | null {
   }
 }
 
+async function syncSheetNow(btn: HTMLButtonElement) {
+  btn.disabled = true;
+  btn.textContent = "Syncing…";
+  try {
+    const res = await fetch("/api/cron/sheet-leads", { method: "POST" });
+    const r = await res.json();
+    if (!res.ok) throw new Error(r.error || "Sync failed");
+    toast(r.imported ? `${r.imported} new lead${r.imported === 1 ? "" : "s"} imported` : "No new leads in the sheet");
+    await refresh(true);
+  } catch (err: any) {
+    toast(err?.message || "Sync failed");
+    render();
+  }
+}
+
 function setLeadStatus(id: any, status: string) {
   if (!canEdit("leads")) return;
   const l = leadById(id);
@@ -1176,6 +1191,7 @@ function renderLeads() {
             ${DB.realtors.map((r: any) => `<option value="${r.id}" ${leadFilter.realtor === r.id ? "selected" : ""}>${r.name}</option>`).join("")}
           </select>
         </div>
+        ${ME?.isAdmin ? `<button class="btn btn-outline" onclick="syncSheetNow(this)">↻ Sync sheet now</button>` : ""}
         ${editable ? `<button class="btn btn-navy" onclick="openLeadForm()">+ Add Lead</button>` : ""}
       </div>
       ${leadFilter.view === "board" ? leadBoard(list, editable) : `<div class="table-wrap"><table>
@@ -1692,7 +1708,7 @@ function publishGlobals() {
     viewProject,
     openProjectForm, submitProject, deleteProject, uploadProjectFiles, removeProjectFile, openShareProject, sendProjectWhatsApp,
     openUnitForm, submitUnit, deleteUnit,
-    openLeadForm, viewLead, submitLead, deleteLead, setLeadStatus,
+    openLeadForm, viewLead, submitLead, deleteLead, setLeadStatus, syncSheetNow,
     openRealtorForm, submitRealtor, deleteRealtor,
     openVisitForm, submitVisit, deleteVisit,
     openBookingForm, submitBooking, deleteBooking,
