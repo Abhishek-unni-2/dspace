@@ -224,8 +224,8 @@ export async function syncLeadsFromSheet(sheetId: string, fromDate: string): Pro
     const cur = await reserveRotation(unassigned.length);
     for (let i = 0; i < unassigned.length; i++) {
       const u = team[(cur + i) % team.length];
-      const data = { ...unassigned[i], assignedTo: u.id, assignedToName: u.name, assignedDate: today, status: "Assigned" };
-      await db.update(erpRecords).set({ data, updatedAt: new Date(), updatedBy: AUTHOR }).where(and(eq(erpRecords.collection, "leads"), eq(erpRecords.id, data.id)));
+      const data: Rec = { ...unassigned[i], assignedTo: u.id, assignedToName: u.name, assignedDate: today, status: "Assigned" };
+      await db.update(erpRecords).set({ data, updatedAt: new Date(), updatedBy: AUTHOR }).where(and(eq(erpRecords.collection, "leads"), eq(erpRecords.id, String(unassigned[i].id))));
     }
     await db.insert(activityLog).values({
       userName: AUTHOR, action: "auto", collection: "leads", recordId: unassigned[0].id,
