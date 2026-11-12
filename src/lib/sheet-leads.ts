@@ -195,6 +195,45 @@ export async function syncLeadsFromSheet(sheetId: string, fromDate: string): Pro
   }
   for (const p of pending) p.data.projectId = tabProject[p.tab] || "";
 
+  // Round-robin across active users whose role is marked "receives leads".
+  const team = await db
+    .select({ id: users.id, name: users.name })
+    .from(users)
+    .innerJoin(roles, eq(users.roleId, roles.id))
+    .where(and(eq(users.isActive, true), eq(roles.receivesLeads, true)))
+    .orderBy(users.createdAt, users.id);
+  const today = new Date().toISOString().slice(0, 10);
+  const reserveRotation = async (n: number) => {
+    const [rr] = await db
+      .insert(erpCounters)
+      .values({ name: "lead_rr", value: n })
+      .onConflictDoUpdate({ target: erpCounters.name, set: { value: sql`${erpCounters.value} + ${n}` } })
+      .returning();
+    return rr.value - n;
+  };
+
+  // Leads imported earlier that never got an owner (e.g. imported before a role
+  // was set to receive leads) are picked up here, so assignment "catches up".
+  const unassigned: Rec[] = team.length
+    ? existingRows
+        .map((r) => r.data)
+        .filter((d) => d?.metaLeadId && !d.assignedTo && d.status === "New")
+        .sort((a, b) => String(a.createdDate).localeCompare(String(b.createdDate)))
+    : [];
+  if (unassigned.length) {
+    const cur = await reserveRotation(unassigned.length);
+    for (let i = 0; i < unassigned.length; i++) {
+      const u = team[(cur + i) % team.length];
+      const data = { ...unassigned[i], assignedTo: u.id, assignedToName: u.name, assignedDate: today, status: "Assigned" };
+      await db.update(erpRecords).set({ data, updatedAt: new Date(), updatedBy: AUTHOR }).where(and(eq(erpRecords.collection, "leads"), eq(erpRecords.id, data.id)));
+    }
+    await db.insert(activityLog).values({
+      userName: AUTHOR, action: "auto", collection: "leads", recordId: unassigned[0].id,
+      summary: `Assigned ${unassigned.length} previously unassigned lead${unassigned.length === 1 ? "" : "s"} across ${team.length} user${team.length === 1 ? "" : "s"}`,
+    });
+    result.assigned = (result.assigned ?? 0) + unassigned.length;
+  }
+
   if (pending.length) {
     // Reserve a block of lead IDs atomically so we never clash with users adding leads.
     const [counter] = await db
@@ -207,24 +246,7 @@ export async function syncLeadsFromSheet(sheetId: string, fromDate: string): Pro
     // Oldest first so ids follow the order leads came in.
     pending.sort((a, b) => a.data.createdDate.localeCompare(b.data.createdDate));
 
-    // Round-robin across active users whose role is marked "receives leads".
-    // The pointer is stored in erp_counters so rotation continues between runs.
-    const team = await db
-      .select({ id: users.id, name: users.name })
-      .from(users)
-      .innerJoin(roles, eq(users.roleId, roles.id))
-      .where(and(eq(users.isActive, true), eq(roles.receivesLeads, true)))
-      .orderBy(users.createdAt, users.id);
-    let cursor = 0;
-    if (team.length) {
-      const [rr] = await db
-        .insert(erpCounters)
-        .values({ name: "lead_rr", value: pending.length })
-        .onConflictDoUpdate({ target: erpCounters.name, set: { value: sql`${erpCounters.value} + ${pending.length}` } })
-        .returning();
-      cursor = rr.value - pending.length;
-    }
-    const today = new Date().toISOString().slice(0, 10);
+    const cursor = team.length ? await reserveRotation(pending.length) : 0;
     const values = pending.map((p, i) => {
       const id = `LD-${String(start + i).padStart(3, "0")}`;
       const data: Rec = { ...p.data, id };
@@ -234,7 +256,7 @@ export async function syncLeadsFromSheet(sheetId: string, fromDate: string): Pro
       }
       return { collection: "leads", id, data, updatedBy: AUTHOR };
     });
-    result.assigned = team.length ? values.length : 0;
+    result.assigned = (result.assigned ?? 0) + (team.length ? values.length : 0);
     for (let i = 0; i < values.length; i += 100) await db.insert(erpRecords).values(values.slice(i, i + 100));
     await db.insert(activityLog).values({
       userName: AUTHOR,
