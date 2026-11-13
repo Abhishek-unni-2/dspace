@@ -2,18 +2,40 @@
 
 import { useActionState, useEffect, useState } from "react";
 import { useFormStatus } from "react-dom";
+import { NAV_MODULES } from "@/lib/permissions";
 import { createUser, resetUserPassword, updateUser, type UserFormState } from "./actions";
 
 type UserRow = {
   id: string;
   name: string;
   email: string;
+  phone: string;
+  modules: string[] | null;
   isActive: boolean;
   roleId: string;
   roleName: string;
   isAdmin: boolean;
 };
 type RoleOption = { id: string; name: string };
+
+// Tick-list of what this user can open (Dashboard + every module). It can only
+// narrow what the user's role already allows.
+function ModulePicker({ selected }: { selected: string[] | null }) {
+  return (
+    <div className="field full">
+      <label>Modules this user can open</label>
+      <div className="module-picks">
+        {NAV_MODULES.map((m) => (
+          <label className="perm-radio" key={m.key}>
+            <input type="checkbox" name="modules" value={m.key} defaultChecked={selected === null || selected.includes(m.key)} />
+            {m.label}
+          </label>
+        ))}
+      </div>
+      <div className="helper-text">Untick to hide a module from this user. Their role still sets view-only vs full access.</div>
+    </div>
+  );
+}
 
 const emptyState: UserFormState = {};
 
@@ -47,6 +69,11 @@ function CreateUserForm({ roles, onDone }: { roles: RoleOption[]; onDone: () => 
             <label>Email *</label>
             <input name="email" type="email" required />
           </div>
+          <div className="field">
+            <label>Mobile (for lead SMS alerts)</label>
+            <input name="phone" type="tel" placeholder="98765 43210" />
+          </div>
+          <ModulePicker selected={null} />
           <div className="field">
             <label>Temporary Password *</label>
             <input name="password" type="password" minLength={8} required />
@@ -101,6 +128,15 @@ function EditUserForm({ user, roles, onDone }: { user: UserRow; roles: RoleOptio
               <label>Email *</label>
               <input name="email" type="email" required defaultValue={user.email} />
             </div>
+            <div className="field">
+              <label>Mobile (for lead SMS alerts)</label>
+              <input name="phone" type="tel" placeholder="98765 43210" defaultValue={user.phone} />
+            </div>
+            {user.isAdmin ? (
+              <div className="field full helper-text">Administrators always have access to every module.</div>
+            ) : (
+              <ModulePicker selected={user.modules} />
+            )}
             <div className="field">
               <label>Role *</label>
               <select name="roleId" required defaultValue={user.roleId}>
@@ -179,6 +215,7 @@ export default function UsersManager({
               <tr>
                 <th>Name</th>
                 <th>Email</th>
+                <th>Mobile</th>
                 <th>Role</th>
                 <th>Status</th>
                 <th></th>
@@ -191,6 +228,7 @@ export default function UsersManager({
                     {u.name} {u.id === currentUserId ? <span className="cell-muted">(you)</span> : null}
                   </td>
                   <td className="cell-muted">{u.email}</td>
+                  <td className="cell-muted">{u.phone ? `+${u.phone}` : "—"}</td>
                   <td>
                     {u.roleName} {u.isAdmin ? <span className="badge badge-gold" style={{ marginLeft: 6 }}>Admin</span> : null}
                   </td>

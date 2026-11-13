@@ -17,6 +17,8 @@ export type CurrentUser = {
     isAdmin: boolean;
     permissions: Permissions;
   };
+  // Dashboard switched on for this user (per-user module list, see Admin -> Users).
+  canDashboard: boolean;
 };
 
 // Re-reads the user + role from the database on every call so that a
@@ -37,6 +39,7 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
       roleName: roles.name,
       isAdmin: roles.isAdmin,
       permissions: roles.permissions,
+      modules: users.modules,
     })
     .from(users)
     .innerJoin(roles, eq(users.roleId, roles.id))
@@ -45,6 +48,16 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
 
   const row = rows[0];
   if (!row) return null;
+
+  // Per-user module list narrows what the role allows (never widens it). The
+  // Administrator role is exempt so an admin can't lock themselves out.
+  const perms = normalizePermissions(row.permissions);
+  let canDashboard = true;
+  if (!row.isAdmin && Array.isArray(row.modules)) {
+    const allowed = new Set(row.modules);
+    for (const key of Object.keys(perms) as ModuleKey[]) if (!allowed.has(key)) perms[key] = "none";
+    canDashboard = allowed.has("dashboard");
+  }
 
   return {
     id: row.id,
@@ -55,8 +68,9 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
       id: row.roleId,
       name: row.roleName,
       isAdmin: row.isAdmin,
-      permissions: normalizePermissions(row.permissions),
+      permissions: perms,
     },
+    canDashboard,
   };
 }
 

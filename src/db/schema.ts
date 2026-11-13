@@ -26,6 +26,10 @@ export const users = pgTable(
     name: text("name").notNull(),
     email: text("email").notNull(),
     passwordHash: text("password_hash").notNull(),
+    // Mobile number (digits with country code, e.g. 919876543210) for SMS lead alerts.
+    phone: text("phone").notNull().default(""),
+    // Per-user module list (keys of NAV_MODULES). null = just follow the role.
+    modules: jsonb("modules").$type<string[] | null>(),
     roleId: uuid("role_id")
       .notNull()
       .references(() => roles.id, { onDelete: "restrict" }),
