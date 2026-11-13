@@ -436,3 +436,4 @@ label.file-btn:hover{background:#e8e8e8;}
 .dt-value a{color:var(--blue);}
 .dt-notes{white-space:pre-line; font-size:13px; background:var(--slate-bg); border-radius:8px; padding:10px 12px;}
 @media (max-width:560px){.detail-grid{grid-template-columns:1fr;}}
+.module-picks{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px 14px; padding:6px 0;}

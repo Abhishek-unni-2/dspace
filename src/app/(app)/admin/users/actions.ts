@@ -7,6 +7,14 @@ import { db } from "@/db";
 import { roles, users } from "@/db/schema";
 import { requireAdmin } from "@/lib/auth-guard";
 import { hashPassword } from "@/lib/password";
+import { NAV_KEYS } from "@/lib/permissions";
+
+// Ticked modules -> stored list. Everything ticked = null (just follow the role,
+// so modules added later show up automatically).
+function modulesFromForm(formData: FormData): string[] | null {
+  const picked = formData.getAll("modules").filter((v): v is string => typeof v === "string" && NAV_KEYS.includes(v));
+  return NAV_KEYS.every((k) => picked.includes(k)) ? null : picked;
+}
 
 // Accepts "98765 43210", "+91 98765 43210" etc. Stores digits with country code
 // (a bare 10-digit number is treated as Indian). Empty = no number.
@@ -50,6 +58,7 @@ export async function createUser(_prev: UserFormState, formData: FormData): Prom
     email: parsed.data.email,
     passwordHash,
     phone: parsed.data.phone,
+    modules: modulesFromForm(formData),
     roleId: parsed.data.roleId,
     isActive: true,
   });
@@ -97,6 +106,7 @@ export async function updateUser(userId: string, _prev: UserFormState, formData:
       name: parsed.data.name,
       email: parsed.data.email,
       phone: parsed.data.phone,
+      modules: modulesFromForm(formData),
       roleId: parsed.data.roleId,
       isActive: parsed.data.isActive,
       updatedAt: new Date(),

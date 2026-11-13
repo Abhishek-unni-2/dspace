@@ -13,6 +13,10 @@ export const MODULES = [
   { key: "commissions", label: "Commissions" },
 ] as const;
 
+// What can be switched on/off per user: the Dashboard plus every module.
+export const NAV_MODULES = [{ key: "dashboard", label: "Dashboard" }, ...MODULES] as const;
+export const NAV_KEYS: string[] = NAV_MODULES.map((m) => m.key);
+
 export type ModuleKey = (typeof MODULES)[number]["key"];
 
 export type AccessLevel = "none" | "view" | "edit";

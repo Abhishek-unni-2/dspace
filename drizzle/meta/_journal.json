@@ -36,6 +36,13 @@
       "when": 1794472933717,
       "tag": "0004_user_phone",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794551022117,
+      "tag": "0005_user_modules",
+      "breakpoints": true
     }
   ]
 }

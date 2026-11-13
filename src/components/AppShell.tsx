@@ -38,6 +38,7 @@ export default function AppShell({
 }: {
   user: {
     name: string;
+    canDashboard: boolean;
     role: { name: string; isAdmin: boolean; permissions: Permissions };
   };
   children: React.ReactNode;
@@ -45,7 +46,7 @@ export default function AppShell({
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const navItems: NavItem[] = [{ key: "dashboard", label: "Dashboard", href: "/dashboard", icon: "dashboard" }];
+  const navItems: NavItem[] = user.canDashboard ? [{ key: "dashboard", label: "Dashboard", href: "/dashboard", icon: "dashboard" }] : [];
   for (const m of MODULES) {
     if (user.role.permissions[m.key] !== "none") {
       navItems.push({ key: m.key, label: m.label, href: `/${m.key}`, icon: MODULE_ICON[m.key] });
