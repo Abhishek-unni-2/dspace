@@ -1179,6 +1179,7 @@ function leadDayStrip(all: any[]) {
         <thead><tr><th></th>${days.map((d) => `<th style="text-align:right;cursor:pointer;" onclick="leadFilter.range='custom'; leadFilter.from='${d}'; leadFilter.to='${d}'; render();">${label(d)}</th>`).join("")}<th style="text-align:right;">Total</th></tr></thead>
         <tbody>
           <tr><td class="cell-strong">All leads</td>${days.map((d) => cell(count(all, d))).join("")}<td style="text-align:right;" class="cell-strong">${days.reduce((a, d) => a + count(all, d), 0)}</td></tr>
+          ${ME?.isAdmin ? `<tr><td class="cell-strong">Salespeople who got leads</td>${days.map((d) => cell(new Set(all.filter((l: any) => l.createdDate === d && l.assignedTo).map((l: any) => l.assignedTo)).size)).join("")}<td></td></tr>` : ""}
           ${rows}
         </tbody>
       </table>
