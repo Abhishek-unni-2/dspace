@@ -1151,6 +1151,40 @@ function leadBoard(list: any[], editable: boolean) {
     </div>`;
 }
 
+// Leads received per day for the last 7 days (by created date), with a per-assignee breakdown for admins.
+// Clicking a day filters the list to that day.
+function leadDayStrip(all: any[]) {
+  const days = [6, 5, 4, 3, 2, 1, 0].map((n) => addDays(-n));
+  const label = (iso: string) => {
+    const d = new Date(iso + "T00:00:00");
+    return d.toLocaleDateString("en-US", { weekday: "short" }) + " " + d.getDate();
+  };
+  const cell = (n: number) => `<td style="text-align:right;font-variant-numeric:tabular-nums;${n ? "font-weight:600;" : "color:#c0392b;"}">${n}</td>`;
+  const count = (arr: any[], d: string) => arr.filter((l: any) => l.createdDate === d).length;
+  const names: string[] = [];
+  if (ME?.isAdmin) {
+    for (const l of all) {
+      const nm = l.assignedToName || "Unassigned";
+      if (days.includes(l.createdDate) && !names.includes(nm)) names.push(nm);
+    }
+  }
+  const rows = names.map((nm) => {
+    const arr = all.filter((l: any) => (l.assignedToName || "Unassigned") === nm);
+    return `<tr><td class="cell-muted">${esc(nm)}</td>${days.map((d) => cell(count(arr, d))).join("")}<td style="text-align:right;" class="cell-muted">${days.reduce((a, d) => a + count(arr, d), 0)}</td></tr>`;
+  }).join("");
+  return `
+    <div class="table-wrap" style="margin-bottom:12px;">
+      <div class="lead-flow-head"><b>Leads by day</b><span class="cell-muted"> · last 7 days · click a day to filter</span></div>
+      <table>
+        <thead><tr><th></th>${days.map((d) => `<th style="text-align:right;cursor:pointer;" onclick="leadFilter.range='custom'; leadFilter.from='${d}'; leadFilter.to='${d}'; render();">${label(d)}</th>`).join("")}<th style="text-align:right;">Total</th></tr></thead>
+        <tbody>
+          <tr><td class="cell-strong">All leads</td>${days.map((d) => cell(count(all, d))).join("")}<td style="text-align:right;" class="cell-strong">${days.reduce((a, d) => a + count(all, d), 0)}</td></tr>
+          ${rows}
+        </tbody>
+      </table>
+    </div>`;
+}
+
 function renderLeads() {
   const rng = leadDateRange();
   const filtered = [...DB.leads].sort((a: any, b: any) => String(b.createdDate || "").localeCompare(String(a.createdDate || "")) || String(b.id).localeCompare(String(a.id))).filter(
@@ -1194,6 +1228,7 @@ function renderLeads() {
         ${ME?.isAdmin ? `<button class="btn btn-outline" onclick="syncSheetNow(this)">↻ Sync sheet now</button>` : ""}
         ${editable ? `<button class="btn btn-navy" onclick="openLeadForm()">+ Add Lead</button>` : ""}
       </div>
+      ${leadDayStrip(filtered)}
       ${leadFilter.view === "board" ? leadBoard(list, editable) : `<div class="table-wrap"><table>
         <thead><tr><th>Lead</th><th>Contact</th><th>Source</th><th>Interested Project</th><th>Budget</th><th>Status</th><th>Assigned To</th><th>Realtor</th><th>Follow-up</th><th>Created</th><th></th></tr></thead>
         <tbody>
